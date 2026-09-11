@@ -28,7 +28,7 @@ async function deleteTask(i){if(!confirm('确定删除该任务？'))return;task
 async function sortTasks(){tasks.sort((a,b)=>(a.name||'').localeCompare(b.name||'','zh-CN'));await saveTasks();renderTasks()}
 function startSyncMonitor(){if(syncStatusTimer)return;syncStatusTimer=setInterval(loadSyncStatus,1500);loadSyncStatus()}
 function stopSyncMonitor(){if(syncStatusTimer){clearInterval(syncStatusTimer);syncStatusTimer=null}}
-async function loadSyncStatus(){const r=await api('/api/sync_status');if(!r.success)return;updateSyncUI(r.sync);if(['idle','error'].includes(r.sync.status)){stopSyncMonitor();loadHistory()}}
+async function loadSyncStatus(){const r=await api('/api/sync_status');if(!r.success)return;updateSyncUI(r.sync);if(['idle','error'].includes(r.sync.status)){const now=Date.now();if(now-(window._lastHistRefresh||0)>4000){window._lastHistRefresh=now;loadHistory()}}}
 function updateSyncUI(s={}){let el=$('sync-progress');if(s.status==='syncing'){let p=+s.progress||0;el.innerHTML=`<div class="progress-meta"><b>${esc(s.message||'同步中')}</b><span>${p}% ${esc(s.speed||'')}</span></div><div class="progress-bar"><i style="width:${p}%"></i></div><div class="current-file">${esc(s.current_file||'')}</div><button class="btn bd btn-sm" onclick="stopSync()">停止同步</button>`}else el.innerHTML=`<div class="state ${s.status==='error'?'bad':''}">${esc(s.message||'空闲')}</div>`}
 async function stopSync(){if(!confirm('停止当前同步？'))return;await api('/api/sync_stop','POST',{});updateSyncUI({status:'idle',message:'已停止'})}
 async function loadHistory(){const [r,s]=await Promise.all([api('/api/history'),api('/api/stats')]);$('k-success').textContent=s.ok||0;$('k-bytes').textContent=size(s.bytes);$('history').innerHTML=(r.history||[]).slice().reverse().map(h=>`<div class="history-row"><span class="status ${h.success?'ok':'bad'}">${h.success?'成功':'失败'}</span><div><b>${esc(h.source)} → ${esc(h.target)}</b><small>${new Date((h.finished_at||0)*1000).toLocaleString()} · ${h.files||0} 文件 · ${size(h.bytes)} · ${duration(h.duration)} · 尝试 ${h.attempts||1} 次${h.diff_bytes!==undefined?` · 剩余差异 ${h.synced?'0 B':'<span class="danger">'+size(h.diff_bytes)+'</span>'}`:''}</small></div><code>${esc(h.exit_code??'-')}</code></div>`).join('')||'<div class="nd">暂无同步历史</div>'}
@@ -48,4 +48,4 @@ function initTheme(){let dark=false;try{dark=localStorage.getItem(THEME_KEY)==='
 // ── 赞助 ──
 function showSponsorModal(){const o=document.getElementById('sponsorModal');if(o)o.classList.add('show')}
 function showSponsorImgFull(img){const o=document.getElementById('sponsorImgOverlay');if(o){o.classList.add('show');document.getElementById('sponsorImgFull').src=img.src}}
-window.onload=async function(){initTheme();await loadAll()};
+window.onload=async function(){initTheme();await loadAll();window._lastHistRefresh=Date.now();startSyncMonitor()};
