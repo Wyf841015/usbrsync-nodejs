@@ -56,8 +56,8 @@ export function createDaemon({ loadTasks, isAllowedPath, requestSync, log }) {
       if (!task.source || !task.target) continue;
       // UUID 绑定校验
       if (task.device_uuid && (!mountedUuid || mountedUuid !== task.device_uuid)) continue;
-      // 源目录必须包含挂载点
-      if (!task.source.includes(mountPoint)) continue;
+      // 源目录必须包含挂载点 (用前缀匹配, 防 substring 误判: /vol1/usbX vs /vol1/usbX2)
+      if (!(task.source === mountPoint || task.source.startsWith(mountPoint + '/'))) continue;
       log(`auto sync triggered: ${task.name||task.id} (${task.source} → ${task.target})`);
       // 触发同步 (采用行于 do_sync_api 的默认参数)
       try {
@@ -74,7 +74,9 @@ export function createDaemon({ loadTasks, isAllowedPath, requestSync, log }) {
   // ── 获取设备 UUID (blkid) ────────────────────────────────────
   function getUuid(device) {
     return new Promise((res) => {
+      const timer = setTimeout(() => res(null), 3000);
       execFile('blkid', ['-s','UUID','-o','value', device], (e, out) => {
+        clearTimeout(timer);
         res(e ? null : (out.trim() || null));
       });
     });

@@ -70,6 +70,11 @@ _feishu_get_token() {
     printf "%s" "${token}"
 }
 
+# JSON 字符串转义 (防字段含引号/反斜杠/换行破坏 payload)
+_json_esc() {
+    printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n\r' '  '
+}
+
 # 写入飞书多维表格
 _feishu_write_record() {
     local token="$1"; shift
@@ -80,6 +85,14 @@ _feishu_write_record() {
     local event_time="$1"; shift
     local status="$1"; shift
     local ip_addr="$1"; shift
+
+    record_id=$(_json_esc "$record_id")
+    app_name=$(_json_esc "$app_name")
+    app_ver=$(_json_esc "$app_ver")
+    old_ver=$(_json_esc "$old_ver")
+    event_time=$(_json_esc "$event_time")
+    status=$(_json_esc "$status")
+    ip_addr=$(_json_esc "$ip_addr")
 
     curl -s --max-time 8 -X POST "https://open.feishu.cn/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${FEISHU_TABLE_ID}/records" \
         -H "Authorization: Bearer ${token}" \

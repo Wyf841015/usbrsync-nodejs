@@ -248,7 +248,12 @@ function readDriveList() {
 // ── API 路由 ───────────────────────────────────────────────────
 async function handleApi(pathname, req, res) {
   const method = req.method;
-  const body = ['POST','PUT'].includes(method) ? await readBody(req) : '';
+  let body;
+  try {
+    body = ['POST','PUT'].includes(method) ? await readBody(req) : '';
+  } catch(e) {
+    return send(res,413,{success:false,error:'请求体过大'});
+  }
 
   try {
     switch(pathname) {
@@ -293,12 +298,16 @@ async function handleApi(pathname, req, res) {
         if (!isAllowedPath(p.source) || !isAllowedPath(p.target)) return send(res,200,{success:false,error:'path not allowed'});
         const cmd = rsync.buildRsyncCmd({ source:p.source, target:p.target, del:!!p.use_delete,
           taskId:p.task_id, checksum:!!p.checksum, dry:true, keep:false });
-        execFile(cmd[0], cmd.slice(1), { timeout:30000 }, (e, so) => {
+        execFile(cmd[0], cmd.slice(1), { timeout:30000, maxBuffer:10*1024*1024 }, (e, so) => {
+          if (e) {
+            const reason = e.code === 'ETIMEDOUT' ? '预览超时' : (e.code==='ENOBUFS' ? '输出过大' : e.message);
+            return send(res,200, { success:false, exit_code:e.code||-1, error:`预览失败 (${reason})` });
+          }
           const out = (so||'').split('\n');
           const adds = out.filter(l => /^>f\+|^cd\+/.test(l)).length;
           const dels = out.filter(l => /^\*deleting/.test(l)).length;
           const chgs = out.filter(l => /^>f|^<f/.test(l)).length;
-          send(res, 200, { success:true, exit_code: e?.code??0, add:adds, delete:dels, change:chgs,
+          send(res, 200, { success:true, exit_code:0, add:adds, delete:dels, change:chgs,
                             lines: out.slice(0,200) });
         });
         return;
@@ -388,9 +397,9 @@ function send(res, code, obj, extra={}) {
 }
 
 function readBody(req) {
-  return new Promise((resolvePromise)=>{
+  return new Promise((resolvePromise, rejectPromise)=>{
     const bufs=[]; let total=0;
-    req.on('data',c=>{total+=c.length; if(total>1048576){req.destroy(); resolvePromise('');return;} bufs.push(c);});
+    req.on('data',c=>{total+=c.length; if(total>1048576){req.destroy(); rejectPromise(new Error('body too large'));return;} bufs.push(c);});
     req.on('end',()=>resolvePromise(Buffer.concat(bufs).toString('utf8')));
     req.on('error',()=>resolvePromise(''));
   });
@@ -405,18 +414,23 @@ const MIME = {
   '.txt':'text/plain; charset=utf-8','.log':'text/plain; charset=utf-8',
 };
 function serveStatic(req, res, urlPath) {
-  let rel = decodeURIComponent(urlPath).replace(/^\/+/,'');
+  let rel;
+  try { rel = decodeURIComponent(urlPath).replace(/^\/+/,''); }
+  catch { return send(res,400,{success:false,error:'bad request'}); }
   if (rel === '' ) rel = 'index.html';
-  // 防止路径穿越
+  // 防止路径穿越 (join 后 realpath 校验真实物理路径, 防 symlink 跳出 www)
   const target = join(WWW_DIR, rel);
-  if (!target.startsWith(WWW_DIR + '/') && target !== WWW_DIR) {
+  let realTarget;
+  try { realTarget = realpathSync(target); }
+  catch { return send(res,404,{success:false,error:'not found'}); }
+  if (!realTarget.startsWith(WWW_DIR + '/') && realTarget !== WWW_DIR) {
     return send(res,403,{success:false,error:'forbidden'});
   }
-  if (!existsSync(target) || !statSync(target).isFile()) {
+  if (!existsSync(realTarget) || !statSync(realTarget).isFile()) {
     return send(res,404,{success:false,error:'not found'});
   }
-  const ext = target.slice(target.lastIndexOf('.')) || '';
-  const body = readFileSync(target);
+  const ext = realTarget.slice(realTarget.lastIndexOf('.')) || '';
+  const body = readFileSync(realTarget);
   res.writeHead(200, {
     'Content-Type': MIME[ext] || 'application/octet-stream',
     'Content-Length': body.length,
