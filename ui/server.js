@@ -6,7 +6,7 @@
 // ═══════════════════════════════════════════════════════════════
 import { createServer } from 'node:http';
 import { execFile, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync, statSync, unlinkSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync, statSync, unlinkSync, renameSync, realpathSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -48,14 +48,42 @@ function log(msg) {
   const line = `${new Date().toISOString().replace('T',' ').slice(0,19)} - ${msg}\n`;
   try { writeFileSync(APP_LOG, line, {flag:'a'}); } catch {}
 }
+// 状态写盘节流: 进度刷新高频(每秒多次), 300ms 合并写, 原子替换防撕裂
+let _statusTimer = null;
 function setSyncStatus(s, p=0, f='', m='', sp='', n=0) {
   syncState = { status:s, progress:p, current_file:f, message:m, speed:sp, xfr_num:n };
-  try { writeFileSync(STATUS_FILE, JSON.stringify(syncState)); } catch {}
+  if (_statusTimer) return; // 已有待写, 合并
+  _statusTimer = setTimeout(() => {
+    _statusTimer = null;
+    try {
+      const t = STATUS_FILE + '.tmp';
+      writeFileSync(t, JSON.stringify(syncState));
+      renameSync(t, STATUS_FILE);
+    } catch {}
+  }, 300);
 }
 function isAllowedPath(p) {
   if (!p || !p.startsWith('/')) return false;
-  return ALLOWED_PATH_PREFIXES.some(prefix =>
-    p === prefix || p.startsWith(prefix + '/') || /^\/vol\d+(\/|$)/.test(p));
+  // 拒绝含 .. 分量 (路径穿越) 和原始含危险字符的路径
+  if (p.split('/').includes('..')) return false;
+  const allowed = new Set(ALLOWED_PATH_PREFIXES);
+  // /vol 是前缀; 其余是精确前缀匹配 (/vol → /vol2, /vol3...)
+  const okPrefix = (prefix) =>
+    p === prefix || p.startsWith(prefix + '/') ||
+    (prefix === '/vol' ? /^\/vol\d+(\/|$)/.test(p) : false);
+  if (!ALLOWED_PATH_PREFIXES.some(okPrefix)) return false;
+  // realpath 归一化后再校验一次 (防 symlink)
+  try {
+    const real = realpathSync(p);
+    if (!ALLOWED_PATH_PREFIXES.some((prefix) => {
+      if (prefix === '/vol') return /^\/vol\d+(\/|$)/.test(real);
+      return real === prefix || real.startsWith(prefix + '/');
+    })) return false;
+  } catch {
+    // 路径不存在: realpath 失败, 允许继续 (由调用方处理不存在)
+    return true;
+  }
+  return true;
 }
 
 // ── 任务 ───────────────────────────────────────────────────────
@@ -63,7 +91,11 @@ function loadTasks() {
   try { return JSON.parse(readFileSync(TASKS_FILE,'utf8')); }
   catch { return { sync_tasks:[], exclusions:[...DEFAULT_EXCLUSIONS] }; }
 }
-function saveTasks(o) { const t=TASKS_FILE+'.tmp'; writeFileSync(t, JSON.stringify(o,null,2)); renameSync(t,TASKS_FILE); }
+function saveTasks(o) {
+  // 唯一临时名防并发覆盖 (history clear 与 appendHistory 可能并发)
+  const t = `${TASKS_FILE}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(t, JSON.stringify(o,null,2)); renameSync(t,TASKS_FILE);
+}
 function excluder(taskId) {
   const { sync_tasks=[], exclusions=[] } = loadTasks();
   const set = new Set(exclusions);
@@ -73,7 +105,10 @@ function excluder(taskId) {
 
 // ── 历史/统计 ─────────────────────────────────────────────────
 function loadHistory() { try { return JSON.parse(readFileSync(HISTORY_FILE,'utf8')); } catch { return []; } }
-function saveHistory(h) { const t=HISTORY_FILE+'.tmp'; writeFileSync(t, JSON.stringify(h)); renameSync(t,HISTORY_FILE); }
+function saveHistory(h) {
+  const t = `${HISTORY_FILE}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(t, JSON.stringify(h)); renameSync(t,HISTORY_FILE);
+}
 function appendHistory(entry) {
   const h = loadHistory(); h.push(entry);
   if (h.length > 100) h.splice(0, h.length-100);
@@ -81,7 +116,19 @@ function appendHistory(entry) {
 }
 
 // ── USB 设备扫描 ──────────────────────────────────────────────
-function scanUsbDevices() {
+// 异步 execFile, 带 timeout 防 blkid/blockdev 挂死阻塞事件循环
+function execFileAsync(cmd, args, timeoutMs=3000) {
+  return new Promise((res) => {
+    const timer = setTimeout(() => res(''), timeoutMs);
+    try {
+      execFile(cmd, args, { timeout: timeoutMs }, (e, out) => {
+        clearTimeout(timer);
+        res(e ? '' : String(out).trim());
+      });
+    } catch { clearTimeout(timer); res(''); }
+  });
+}
+async function scanUsbDevices() {
   const devs = [];
   try {
     for (const line of readFileSync('/proc/mounts','utf8').split('\n')) {
@@ -91,9 +138,10 @@ function scanUsbDevices() {
       if (!/^\/dev\/sd/.test(device)) continue;
       if (!/(vfat|ntfs|exfat|fuseblk|ext)/.test(fs)) continue;
       let uuid='', label='', size='0';
-      try { uuid = execFileSync('blkid',['-s','UUID','-o','value',device]).toString().trim(); } catch {}
-      try { label = execFileSync('blkid',['-s','LABEL','-o','value',device]).toString().trim(); } catch {}
-      try { size = execFileSync('blockdev',['--getsize64',device]).toString().trim(); } catch {}
+      // 异步 + 超时, 避免挂起设备冻结事件循环
+      uuid  = await execFileAsync('blkid',['-s','UUID','-o','value',device]);
+      label = await execFileAsync('blkid',['-s','LABEL','-o','value',device]);
+      size  = await execFileAsync('blockdev',['--getsize64',device]) || '0';
       devs.push({ device, mount_point:mp, fs_type:fs, name:label||basename(mp), uuid, label,
                   size: size || '0' });
     }
@@ -154,8 +202,15 @@ function rotateLog() {
 }
 function stopSync() {
   if (running) {
-    if (running.stop) running.stop();
-    running = null;
+    const ctl = running;
+    if (ctl.stop) ctl.stop();
+    // 等待旧子进程真正退出后再清 running, 防新同步与旧进程并发写目标
+    Promise.race([
+      ctl.donePromise || Promise.resolve(),
+      new Promise((r) => setTimeout(r, 5000)),
+    ]).finally(() => {
+      if (running === ctl) running = null;
+    });
     setSyncStatus('idle',0,'','已停止','',0);
   } else {
     setSyncStatus('idle',0,'','已停止','',0);
@@ -198,13 +253,13 @@ async function handleApi(pathname, req, res) {
   try {
     switch(pathname) {
       case '/status': {
-        const devCount = scanUsbDevices().length;
+        const devCount = (await scanUsbDevices()).length;
         send(res,200,{ success:true, version:VERSION, tasks_count:loadTasks().sync_tasks?.length||0,
                         device_count:devCount, sync:syncState });
         return;
       }
       case '/devices':
-        send(res,200,{ success:true, devices:scanUsbDevices() }); return;
+        send(res,200,{ success:true, devices:await scanUsbDevices() }); return;
       case '/drives':
         send(res,200,{ success:true, drives:readDriveList() }); return;
       case '/tasks': {
@@ -224,9 +279,11 @@ async function handleApi(pathname, req, res) {
         if (!p.source || !p.target) return send(res,200,{success:false,error:'source/target required'});
         if (!isAllowedPath(p.source) || !isAllowedPath(p.target)) return send(res,200,{success:false,error:'path not allowed'});
         if (p.check_space !== false) {
-          const ok = await rsync.checkSpace(p.source, p.target);
-          if (!ok) return send(res,200,{success:false,error:'目标空间不足'});
+          const cs = await rsync.checkSpace(p.source, p.target);
+          if (!cs.ok) return send(res,200,{success:false,error:cs.reason||'目标空间不足'});
         }
+        // 互斥最终防线 (checkSpace await 期间可能已有其他同步进入)
+        if (syncRunning()) return send(res,200,{ success:false, error:'已有同步正在运行，请先停止或等待完成' });
         const r = await requestSync(p);
         return send(res,200,{ success:true, result:r });
       }
@@ -325,7 +382,6 @@ function send(res, code, obj, extra={}) {
   res.writeHead(code, {
     'Content-Type':'application/json',
     'Cache-Control':'no-cache',
-    'Access-Control-Allow-Origin':'*',
     ...(extra.download?{'Content-Disposition':`attachment; filename="${extra.download}"`}:{}),
   });
   res.end(body);
@@ -370,7 +426,20 @@ function serveStatic(req, res, urlPath) {
 }
 
 // ── HTTP server ────────────────────────────────────────────────
+// PORT 模式(非网关 socket)下校验同源, 防本地 CSRF; socket 模式由 fnOS 网关鉴权
+function originAllowed(req) {
+  if (!PORT_MODE) return true;   // socket 模式: 网关注入鉴权
+  const origin = req.headers.origin || req.headers.referer;
+  if (!origin) return true;      // 同源/无来源(curl)放行
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch { return false; }
+}
 const server = createServer(async (req, res) => {
+  // PORT 模式跨域来源拒绝
+  if (req.method !== 'GET' && !originAllowed(req)) {
+    return send(res,403,{success:false,error:'cross-origin not allowed'});
+  }
   const url = new URL(req.url, 'http://localhost');
   const pathname = url.pathname;
 
@@ -425,6 +494,14 @@ function start() {
 }
 
 function debug(m){ console.log(`[usbrsync] ${m}`); }
+
+// 进程级异常处理: 避免未捕获 promise 拒绝导致整个 server+daemon 崩溃
+process.on('unhandledRejection', (reason) => {
+  try { log(`unhandledRejection: ${reason?.stack||reason}`); } catch {}
+});
+process.on('uncaughtException', (err) => {
+  try { log(`uncaughtException: ${err?.stack||err}`); } catch {}
+});
 
 // 启动 (cmd/main 调用)
 start().catch((e)=>{ console.error(`[usbrsync] startup failed: ${e.message}`); process.exit(1); });

@@ -58,16 +58,17 @@ export function buildRsyncCmd({ source, target, del=false, taskId=null, checksum
 }
 
 // ── 空间检查 ─────────────────────────────────────────────────────
+// fail-closed: 无法确认空间足够时不放行 (返回 {ok:false, reason})
 export function checkSpace(source, target) {
   return new Promise((res) => {
-    execFile('du', ['-sb', source], (e1, so1) => {
-      if (e1) return res(true);
+    execFile('du', ['-sb', source], {timeout:10000}, (e1, so1) => {
+      if (e1) return res({ ok:false, reason:`无法获取源空间 (${e1.message})` });
       const need = parseInt((so1.toString().trim().split('\t')[0]) || '0', 10) || 0;
-      execFile('df', ['-PB1', target], (e2, so2) => {
-        if (e2) return res(true);
+      execFile('df', ['-PB1', target], {timeout:10000}, (e2, so2) => {
+        if (e2) return res({ ok:false, reason:`无法获取目标空间 (${e2.message})` });
         const last = so2.toString().trim().split('\n').pop() || '';
         const free = parseInt(last.split(/\s+/)[3] || '0', 10) || 0;
-        res(Number.isFinite(need) ? free >= need : true);
+        res(Number.isFinite(need) ? { ok: free >= need, reason: free < need ? `目标可用 ${free} 字节 < 需要 ${need}` : '' } : { ok:true });
       });
     });
   });
@@ -97,13 +98,39 @@ function parseLine(line) {
 }
 
 // ── 单次 rsync 执行 ──────────────────────────────────────────────
-// 接收已 spawn 的 child, 返回 Promise: { code, out } (10s 硬超时兜底)
+// 接收已 spawn 的 child, 返回 Promise: { code, out }
+// 超时策略: 无活动超时 (5 分钟无 stdout/stderr 输出才 kill, 防 /dev 挂死)
+const EXEC_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟无输出才判卡死
 function execRsync(child, synclog, onProgress) {
   return new Promise((res) => {
     let out = '', done = false;
-    const fin = (code) => { if (!done) { done = true; if (_hook?.log) _hook.log(`execRsync done code=${code} (stdout ${out.length}B)`); res({ code, out }); } };
+    let lastActivity = Date.now();
+    let timer = null;
+    const fin = (code) => {
+      if (!done) {
+        done = true;
+        if (timer) clearTimeout(timer);
+        if (_hook?.log) _hook.log(`execRsync done code=${code} (stdout ${out.length}B)`);
+        res({ code, out });
+      }
+    };
+    const touch = () => { lastActivity = Date.now(); };
+    const resetIdleTimer = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (!done && Date.now() - lastActivity >= EXEC_IDLE_TIMEOUT_MS) {
+          if (_hook?.log) _hook.log(`execRsync IDLE TIMEOUT ${EXEC_IDLE_TIMEOUT_MS/1000}s (no output)`);
+          try { child.kill('SIGKILL'); } catch {}
+          fin(-1);
+        } else {
+          // 有活动则重新计时
+          resetIdleTimer();
+        }
+      }, EXEC_IDLE_TIMEOUT_MS);
+    };
     if (_hook?.log) _hook.log(`execRsync spawned pid=${child.pid}`);
     child.stdout.on('data', (d) => {
+      touch();
       const str = d.toString();
       out += str;
       if (synclog) { try { appendFileSync(synclog, str); } catch { if (_hook?.log) _hook.log('appendFileSync(sync.log) failed'); } }
@@ -114,6 +141,7 @@ function execRsync(child, synclog, onProgress) {
       }
     });
     child.stderr.on('data', (d) => {
+      touch();
       if (synclog) { try { appendFileSync(synclog, d.toString()); } catch {} }
     });
     child.on('error', (e) => {
@@ -121,8 +149,8 @@ function execRsync(child, synclog, onProgress) {
       fin(-1);
     });
     child.on('close', (code) => fin(code ?? -1));
-    // 硬超时兜底 (translate EAGAIN/pipe 卡住)
-    setTimeout(() => { if (!done) { if (_hook?.log) _hook.log('execRsync TIMEOUT 10s'); try { child.kill('SIGKILL'); } catch {} fin(-1); } }, 10000);
+    // 启动无活动超时
+    resetIdleTimer();
   });
 }
 

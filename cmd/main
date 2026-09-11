@@ -4,6 +4,10 @@
 #   替代原 bash CGI (index.cgi + api.sh) + bash 守护 (mount_monitor) 分离架构
 # 数据目录: TRIM_PKGVAR/fnOS 注入 (重装不丢)
 
+# 变量兜底: 未注入时避免写到根目录
+TRIM_PKGVAR="${TRIM_PKGVAR:-/tmp/usbrsync}"
+TRIM_APPDEST="${TRIM_APPDEST:-/vol3/@appcenter/usbrsync}"
+
 LOG_FILE="${TRIM_PKGVAR}/info.log"
 PID_FILE="${TRIM_PKGVAR}/app.pid"
 
@@ -17,7 +21,13 @@ export PATH=/var/apps/nodejs_v24/target/bin:$PATH
 CMD="node ${TRIM_APPDEST}/ui/server.js"
 
 log_msg() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+_start_node() {
+    # 后台启动 node, 确保 PID 指向 node 进程而非 bash 包装
+    nohup node "${TRIM_APPDEST}/ui/server.js" >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${PID_FILE}"
 }
 
 start_process() {
@@ -25,28 +35,33 @@ start_process() {
         return 0
     fi
     log_msg "Starting process ..."
-    bash -c "${CMD}" >> ${LOG_FILE} 2>&1 &
-    printf "%s" "$!" > ${PID_FILE}
+    _start_node
     log_msg "pid=$!"
+    sleep 1
+    # 启动后校验 node 真正存活 (非仅 PID 文件存在)
+    if ! status; then
+        log_msg "startup failed - node exited"
+        return 1
+    fi
     return 0
 }
 
 stop_process() {
     log_msg "Stopping process ..."
-    if [ -f "$PID_FILE" ]; then
+    if [ -f "${PID_FILE}" ]; then
         local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            kill -TERM "$pid" 2>/dev/null
+        pid=$(cat "${PID_FILE}" 2>/dev/null)
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            kill -TERM "${pid}" 2>/dev/null
             sleep 2
-            kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+            kill -0 "${pid}" 2>/dev/null && kill -KILL "${pid}" 2>/dev/null
         fi
-        rm -f "$PID_FILE"
+        rm -f "${PID_FILE}"
     fi
 }
 
 status() {
-    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
         return 0
     fi
     return 1

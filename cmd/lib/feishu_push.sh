@@ -50,21 +50,21 @@ _feishu_get_device_uuid() {
 # 获取 IP 归属地（城市/省/国家）
 _feishu_get_ip_location() {
     local city region country
-    city=$(curl -s --connect-timeout 5 "https://ipinfo.io/city" 2>/dev/null || true)
-    region=$(curl -s --connect-timeout 5 "https://ipinfo.io/region" 2>/dev/null || true)
-    country=$(curl -s --connect-timeout 5 "https://ipinfo.io/country" 2>/dev/null || true)
+    city=$(curl -s --connect-timeout 5 --max-time 5 "https://ipinfo.io/city" 2>/dev/null || true)
+    region=$(curl -s --connect-timeout 5 --max-time 5 "https://ipinfo.io/region" 2>/dev/null || true)
+    country=$(curl -s --connect-timeout 5 --max-time 5 "https://ipinfo.io/country" 2>/dev/null || true)
     printf "%s %s %s" "${city}" "${region}" "${country}"
 }
 
 # 获取飞书 tenant_access_token
 _feishu_get_token() {
     local resp token
-    resp=$(curl -s -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
+    resp=$(curl -s --max-time 8 -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
         -H "Content-Type: application/json" \
         -d "{\"app_id\":\"${FEISHU_APP_ID}\",\"app_secret\":\"${FEISHU_APP_SECRET}\"}" 2>/dev/null)
     token=$(printf "%s" "${resp}" | grep -o '"tenant_access_token":"[^"]*"' | cut -d'"' -f4)
     if [ -z "${token}" ]; then
-        echo "[feishu] Failed to get token: ${resp}" >&2
+        echo "[feishu] Failed to get token" >&2
         return 1
     fi
     printf "%s" "${token}"
@@ -81,7 +81,7 @@ _feishu_write_record() {
     local status="$1"; shift
     local ip_addr="$1"; shift
 
-    curl -s -X POST "https://open.feishu.cn/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${FEISHU_TABLE_ID}/records" \
+    curl -s --max-time 8 -X POST "https://open.feishu.cn/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${FEISHU_TABLE_ID}/records" \
         -H "Authorization: Bearer ${token}" \
         -H "Content-Type: application/json" \
         -d "{
