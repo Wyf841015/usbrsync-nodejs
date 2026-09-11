@@ -1,0 +1,10 @@
+#!/bin/bash
+### This script is called after the user installs the application.
+# 升级时跳过（由 upgrade_callback 处理）
+if [ -n "${TRIM_OLD_APPVER:-}" ]; then
+    exit 0
+fi
+
+# 飞书/企业微信安装统计已停用（避免凭据硬编码泄露）
+# 原 WeCom webhook URL 已删除，参照 fnclearup A 方案
+exit 0

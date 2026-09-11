@@ -1,0 +1,5 @@
+#!/bin/bash
+### This script is called after the user upgrades the application.
+# 飞书/企业微信升级统计已停用（避免凭据硬编码泄露）
+# 原 WeCom webhook URL 已删除，参照 fnclearup A 方案
+exit 0
