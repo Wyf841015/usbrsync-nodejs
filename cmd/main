@@ -1,0 +1,81 @@
+#!/bin/bash
+# USB Rsync Node.js 启动脚本 (v0.4.1)
+# 架构: 单个 Node.js 常驻进程 = HTTP server + USB 监控守护 + 计划调度
+#   替代原 bash CGI (index.cgi + api.sh) + bash 守护 (mount_monitor) 分离架构
+# 数据目录: TRIM_PKGVAR/fnOS 注入 (重装不丢)
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+
+# 关键: 把 fnOS 的 TRIM_PKGVAR 桥接成 Node 识别 TRM_PKGVAR
+# (Node 项目约定 TRM_*, 框架只给 shell 注入 TRIM_*, 不自动同步)
+export TRM_PKGVAR="${TRIM_PKGVAR}"
+
+# fnOS 提供的 node 运行时
+export PATH=/var/apps/nodejs_v24/target/bin:$PATH
+
+CMD="node ${TRIM_APPDEST}/ui/server.js"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
+}
+
+start_process() {
+    if status; then
+        return 0
+    fi
+    log_msg "Starting process ..."
+    bash -c "${CMD}" >> ${LOG_FILE} 2>&1 &
+    printf "%s" "$!" > ${PID_FILE}
+    log_msg "pid=$!"
+    return 0
+}
+
+stop_process() {
+    log_msg "Stopping process ..."
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null
+            sleep 2
+            kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+        fi
+        rm -f "$PID_FILE"
+    fi
+}
+
+status() {
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+case "${1:-}" in
+    start)
+        start_process
+        log_msg "usbrsync started"
+        ;;
+    stop)
+        stop_process
+        log_msg "usbrsync stopped"
+        ;;
+    restart)
+        stop_process
+        sleep 1
+        start_process
+        ;;
+    status)
+        if status; then
+            echo "usbrsync: running (pid $(cat "$PID_FILE"))"
+        else
+            echo "usbrsync: stopped"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+exit 0

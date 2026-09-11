@@ -1,0 +1,430 @@
+#!/usr/bin/env node
+// ═══════════════════════════════════════════════════════════════
+// USB Rsync — Node.js 重写版 (v0.4.1) — 入口
+// 单进程: HTTP server(静态+API) + USB监控守护 + 计划调度
+// 零 npm 依赖
+// ═══════════════════════════════════════════════════════════════
+import { createServer } from 'node:http';
+import { execFile, execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync, statSync, unlinkSync, renameSync } from 'node:fs';
+import { dirname, join, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import * as rsync from './rsync.js';
+import { createDaemon } from './daemon.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
+const VERSION = '0.4.1';
+
+// ── 数据目录 ───────────────────────────────────────────────────
+const DATA_BASE = process.env.TRM_PKGVAR || '/tmp/usbrsync-nodejs';
+const CONFIG_DIR = join(DATA_BASE,'config');
+const LOG_DIR    = join(DATA_BASE,'logs');
+const TASKS_FILE = join(CONFIG_DIR,'tasks.json');
+const HISTORY_FILE = join(DATA_BASE,'history.json');
+const STATUS_FILE  = join(DATA_BASE,'sync_status.json');
+const SYNCLOG  = join(LOG_DIR,'sync.log');
+const APP_LOG  = join(LOG_DIR,'usbrsync.log');
+const WWW_DIR  = join(__dirname,'www');
+mkdirSync(CONFIG_DIR,{recursive:true});
+mkdirSync(LOG_DIR,{recursive:true});
+
+// ── Socket ─────────────────────────────────────────────────────
+const SOCK_NAME = 'usbrsync.sock';
+const SOCK_PATH = join(APP_ROOT, SOCK_NAME);
+const PORT_MODE = process.env.PORT || 0;
+
+// ── 状态 ───────────────────────────────────────────────────────
+let syncState = { status:'idle', progress:0, current_file:'', message:'空闲', speed:'', xfr_num:0 };
+let running = null;  // { stop() } 当前运行的同步控制器
+let syncHistory = [];
+
+const DEFAULT_EXCLUSIONS = ['*.tmp','*.temp','~*','.DS_Store','Thumbs.db','System Volume Information','$RECYCLE.BIN/'];
+const ALLOWED_PATH_PREFIXES = ['/vol','/mnt','/media','/tmp'];
+
+// ── 工具 ───────────────────────────────────────────────────────
+function log(msg) {
+  const line = `${new Date().toISOString().replace('T',' ').slice(0,19)} - ${msg}\n`;
+  try { writeFileSync(APP_LOG, line, {flag:'a'}); } catch {}
+}
+function setSyncStatus(s, p=0, f='', m='', sp='', n=0) {
+  syncState = { status:s, progress:p, current_file:f, message:m, speed:sp, xfr_num:n };
+  try { writeFileSync(STATUS_FILE, JSON.stringify(syncState)); } catch {}
+}
+function isAllowedPath(p) {
+  if (!p || !p.startsWith('/')) return false;
+  return ALLOWED_PATH_PREFIXES.some(prefix =>
+    p === prefix || p.startsWith(prefix + '/') || /^\/vol\d+(\/|$)/.test(p));
+}
+
+// ── 任务 ───────────────────────────────────────────────────────
+function loadTasks() {
+  try { return JSON.parse(readFileSync(TASKS_FILE,'utf8')); }
+  catch { return { sync_tasks:[], exclusions:[...DEFAULT_EXCLUSIONS] }; }
+}
+function saveTasks(o) { const t=TASKS_FILE+'.tmp'; writeFileSync(t, JSON.stringify(o,null,2)); renameSync(t,TASKS_FILE); }
+function excluder(taskId) {
+  const { sync_tasks=[], exclusions=[] } = loadTasks();
+  const set = new Set(exclusions);
+  if (taskId) { const t = sync_tasks.find(x=>x.id===taskId); (t?.task_exclusions||[]).forEach(x=>set.add(x)); }
+  return [...set];
+}
+
+// ── 历史/统计 ─────────────────────────────────────────────────
+function loadHistory() { try { return JSON.parse(readFileSync(HISTORY_FILE,'utf8')); } catch { return []; } }
+function saveHistory(h) { const t=HISTORY_FILE+'.tmp'; writeFileSync(t, JSON.stringify(h)); renameSync(t,HISTORY_FILE); }
+function appendHistory(entry) {
+  const h = loadHistory(); h.push(entry);
+  if (h.length > 100) h.splice(0, h.length-100);
+  try { saveHistory(h); return true; } catch { return false; }
+}
+
+// ── USB 设备扫描 ──────────────────────────────────────────────
+function scanUsbDevices() {
+  const devs = [];
+  try {
+    for (const line of readFileSync('/proc/mounts','utf8').split('\n')) {
+      const parts = line.split(' ');
+      if (parts.length < 3) continue;
+      const device=parts[0], mp=parts[1], fs=parts[2];
+      if (!/^\/dev\/sd/.test(device)) continue;
+      if (!/(vfat|ntfs|exfat|fuseblk|ext)/.test(fs)) continue;
+      let uuid='', label='', size='0';
+      try { uuid = execFileSync('blkid',['-s','UUID','-o','value',device]).toString().trim(); } catch {}
+      try { label = execFileSync('blkid',['-s','LABEL','-o','value',device]).toString().trim(); } catch {}
+      try { size = execFileSync('blockdev',['--getsize64',device]).toString().trim(); } catch {}
+      devs.push({ device, mount_point:mp, fs_type:fs, name:label||basename(mp), uuid, label,
+                  size: size || '0' });
+    }
+  } catch {}
+  return devs;
+}
+
+// ── rsync 核心绑定 ─────────────────────────────────────────────
+rsync.bindHook({
+  setStatus: setSyncStatus,
+  log,
+  excluder,
+  appendHistory,
+  notify: (title, content, level) => notifyDone(title, content, level),
+});
+
+// ── fnOS 通知 (psql) ───────────────────────────────────────────
+function notifyDone(title, content, level) {
+  try {
+    const t = String(title).replace(/'/g,"''").replace(/[\r\n]/g,'');
+    const c = String(content).replace(/'/g,"''").replace(/[\r\n]/g,'');
+    execFile('psql', ['-U','postgres','-d','trim','-v','ON_ERROR_STOP=0','-c',
+      `WITH n AS (INSERT INTO notify(cat,level,title,source,content,dateandtime) VALUES(0,${level},'${t}','USBRsync','${c}',extract(epoch from now())::bigint) RETURNING id) INSERT INTO notify_user(uid,notify_id,read) SELECT uid,id,0 FROM users,n;`],
+      { timeout: 10000 }, () => {});
+  } catch {}
+}
+
+// ── 同步触发 (daemon 与 API 共用) ──────────────────────────────
+function requestSync(p) {
+  return new Promise((res, rej) => {
+    if (running) { res({ status:'busy', message:'已有同步正在运行' }); return; }
+    if (!p.source || !p.target || !isAllowedPath(p.source) || !isAllowedPath(p.target)) {
+      res({ status:'error', message:'路径不允许或缺失' }); return;
+    }
+    // 旋转日志
+    rotateLog();
+    // 后台启动
+    const ctl = rsync.startSync({
+      source:p.source, target:p.target, bidirectional:p.bidirectional,
+      del:p.use_delete, taskId:p.task_id, retry:p.retry_count,
+      delay:p.retry_delay, checksum:p.checksum, keep:p.keep_history, notify:p.notify,
+    }, { setStatus:setSyncStatus, synclog:SYNCLOG, appendHistory, notify:notifyDone });
+    running = ctl;
+    // 完成后清 running (startSync 返回 donePromise, 在完成时 resolve)
+    ctl.donePromise.then(() => { if (running === ctl) running = null; })
+       .catch(() => { if (running === ctl) running = null; });
+    res({ status:'running', message:'同步已开始' });
+  });
+}
+function rotateLog() {
+  try {
+    if (statSync(SYNCLOG).size > 5*1024*1024) {
+      const b = join(LOG_DIR,'sync.log.1.bak');
+      if (existsSync(b)) unlinkSync(b);
+      renameSync(SYNCLOG, b);
+    }
+  } catch {}
+}
+function stopSync() {
+  if (running) {
+    if (running.stop) running.stop();
+    running = null;
+    setSyncStatus('idle',0,'','已停止','',0);
+  } else {
+    setSyncStatus('idle',0,'','已停止','',0);
+  }
+}
+function syncRunning() { return !!running; }
+
+// ── 日志读取 ───────────────────────────────────────────────────
+function readSyncLog(lines=200) {
+  try {
+    const all = readFileSync(SYNCLOG,'utf8').split('\n').filter(Boolean);
+    return all.slice(-Math.min(lines,5000));
+  } catch { return []; }
+}
+function readDriveList() {
+  const drives = [];
+  for (const basePath of ['/vol','/mnt','/media']) {
+    try {
+      for (const d of readdirSync(basePath)) {
+        const p = join(basePath,d);
+        if (!statSync(p).isDirectory()) continue;
+        let size=0, free=0;
+        try {
+          const o = execFileSync('df',['-PB1',p]).toString().split('\n').pop();
+          const parts = o.split(/\s+/);
+          size = parseInt(parts[1]||'0',10); free = parseInt(parts[3]||'0',10);
+        } catch {}
+        drives.push({ path:p, name:d, size, free });
+      }
+    } catch {}
+  }
+  return drives;
+}
+
+// ── API 路由 ───────────────────────────────────────────────────
+async function handleApi(pathname, req, res) {
+  const method = req.method;
+  const body = ['POST','PUT'].includes(method) ? await readBody(req) : '';
+
+  try {
+    switch(pathname) {
+      case '/status': {
+        const devCount = scanUsbDevices().length;
+        send(res,200,{ success:true, version:VERSION, tasks_count:loadTasks().sync_tasks?.length||0,
+                        device_count:devCount, sync:syncState });
+        return;
+      }
+      case '/devices':
+        send(res,200,{ success:true, devices:scanUsbDevices() }); return;
+      case '/drives':
+        send(res,200,{ success:true, drives:readDriveList() }); return;
+      case '/tasks': {
+        if (method === 'POST') {
+          try { const o=JSON.parse(body||'{}'); if (!o.sync_tasks) throw new Error('missing sync_tasks');
+            saveTasks(o); send(res,200,{success:true}); }
+          catch(e){ send(res,400,{success:false,error:'empty body or invalid'}); }
+        } else {
+          send(res,200,{ success:true, tasks:loadTasks() });
+        }
+        return;
+      }
+      case '/sync': {
+        if (method !== 'POST') return send(res,405,{success:false,error:'POST required'});
+        let p; try { p = JSON.parse(body||'{}'); } catch { p={}; }
+        if (syncRunning()) return send(res,200,{ success:false, error:'已有同步正在运行，请先停止或等待完成' });
+        if (!p.source || !p.target) return send(res,200,{success:false,error:'source/target required'});
+        if (!isAllowedPath(p.source) || !isAllowedPath(p.target)) return send(res,200,{success:false,error:'path not allowed'});
+        if (p.check_space !== false) {
+          const ok = await rsync.checkSpace(p.source, p.target);
+          if (!ok) return send(res,200,{success:false,error:'目标空间不足'});
+        }
+        const r = await requestSync(p);
+        return send(res,200,{ success:true, result:r });
+      }
+      case '/preview': {
+        let p; try { p=JSON.parse(body||'{}'); } catch { p={}; }
+        if (!p.source || !p.target) return send(res,200,{success:false,error:'source/target required'});
+        if (!isAllowedPath(p.source) || !isAllowedPath(p.target)) return send(res,200,{success:false,error:'path not allowed'});
+        const cmd = rsync.buildRsyncCmd({ source:p.source, target:p.target, del:!!p.use_delete,
+          taskId:p.task_id, checksum:!!p.checksum, dry:true, keep:false });
+        execFile(cmd[0], cmd.slice(1), { timeout:30000 }, (e, so) => {
+          const out = (so||'').split('\n');
+          const adds = out.filter(l => /^>f\+|^cd\+/.test(l)).length;
+          const dels = out.filter(l => /^\*deleting/.test(l)).length;
+          const chgs = out.filter(l => /^>f|^<f/.test(l)).length;
+          send(res, 200, { success:true, exit_code: e?.code??0, add:adds, delete:dels, change:chgs,
+                            lines: out.slice(0,200) });
+        });
+        return;
+      }
+      case '/sync_stop':
+        stopSync(); send(res,200,{success:true}); return;
+      case '/sync_status':
+        send(res,200,{ success:true, sync:syncState }); return;
+      case '/restore': {
+        if (method !== 'POST') return send(res,405,{success:false,error:'POST required'});
+        let p; try { p=JSON.parse(body||'{}'); } catch { p={}; }
+        const source = p.target, target = p.source; // 反向
+        if (syncRunning()) return send(res,200,{success:false,error:'已有同步正在运行，请先停止或等待完成'});
+        if (!source || !target) return send(res,200,{success:false,error:'source/target required'});
+        if (!isAllowedPath(source) || !isAllowedPath(target)) return send(res,200,{success:false,error:'path not allowed'});
+        // 恢复: 从 target 恢复到 source
+        const r = await requestSync({ source, target, bidirectional:false, use_delete:false,
+          task_id: p.task_id+' (restore)', retry_count:p.retry_count||0, retry_delay:p.retry_delay||5,
+          checksum:false, keep:false, notify:p.notify!==false });
+        return send(res,200,{ success:true, result:r });
+      }
+      case '/diff': {
+        const source = readQuery(req).source, target = readQuery(req).target;
+        if (!isAllowedPath(source) || !isAllowedPath(target)) return send(res,200,{success:false,error:'path not allowed'});
+        const d = await rsync.diffDirs(source, target);
+        return send(res,200,{ success:true, ...d });
+      }
+      case '/history': {
+        const q = readQuery(req);
+        if (/^(DELETE|POST)$/.test(method) && q.action === 'clear') saveHistory([]);
+        send(res,200,{ success:true, history:loadHistory() }); return;
+      }
+      case '/stats': {
+        const h = loadHistory();
+        let total=0,ok=0,bytes=0,duration=0;
+        for (const e of h) { total++; if(e.success)ok++; bytes+=e.bytes||0; duration+=e.duration||0; }
+        send(res,200,{ success:true,total,ok,fail:total-ok,bytes,duration }); return;
+      }
+      case '/log': {
+        const n = parseInt(readQuery(req).lines,10)||200;
+        send(res,200,{ success:true, lines:readSyncLog(n).length, log:readSyncLog(n) }); return;
+      }
+      case '/browse': {
+        const dir = readQuery(req).path || '/';
+        if (!isAllowedPath(dir)) return send(res,200,{success:false,error:'path not allowed'});
+        let entries=[];
+        try {
+          for (const d of readdirSync(dir)) {
+            const p=join(dir,d);
+            entries.push({ name:d, type: statSync(p).isDirectory()?'dir':'file' });
+          }
+        } catch { return send(res,200,{success:false,error:'not a directory'}); }
+        entries.sort((a,b)=>a.name.localeCompare(b.name));
+        send(res,200,{ success:true, path:dir, entries }); return;
+      }
+      case '/config_export':
+        send(res,200, loadTasks(), { download:'usbrsync-config.json' }); return;
+      case '/config_import': {
+        try { const o=JSON.parse(body||'{}'); if (!o.sync_tasks) throw new Error('invalid');
+          saveTasks(o); send(res,200,{success:true}); }
+        catch(e){ send(res,200,{success:false,error:'invalid config'}); }
+        return;
+      }
+      default:
+        send(res,404,{ success:false, error:`Not found: ${pathname}` });
+    }
+  } catch(e) {
+    try { log(`api error ${pathname}: ${e.message}`); } catch {}
+    res.headersSent || send(res,500,{ success:false, error:`服务器错误: ${e.message}` });
+  }
+}
+
+function readQuery(req) {
+  const url = new URL(req.url, 'http://localhost');
+  return Object.fromEntries(url.searchParams.entries());
+}
+
+function send(res, code, obj, extra={}) {
+  if (res.headersSent) return;
+  const body = JSON.stringify(obj);
+  res.writeHead(code, {
+    'Content-Type':'application/json',
+    'Cache-Control':'no-cache',
+    'Access-Control-Allow-Origin':'*',
+    ...(extra.download?{'Content-Disposition':`attachment; filename="${extra.download}"`}:{}),
+  });
+  res.end(body);
+}
+
+function readBody(req) {
+  return new Promise((resolvePromise)=>{
+    const bufs=[]; let total=0;
+    req.on('data',c=>{total+=c.length; if(total>1048576){req.destroy(); resolvePromise('');return;} bufs.push(c);});
+    req.on('end',()=>resolvePromise(Buffer.concat(bufs).toString('utf8')));
+    req.on('error',()=>resolvePromise(''));
+  });
+}
+
+// ── 静态文件 ───────────────────────────────────────────────────
+const MIME = {
+  '.html':'text/html; charset=utf-8','.htm':'text/html; charset=utf-8',
+  '.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8',
+  '.json':'application/json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg',
+  '.jpeg':'image/jpeg','.gif':'image/gif','.svg':'image/svg+xml','.ico':'image/x-icon',
+  '.txt':'text/plain; charset=utf-8','.log':'text/plain; charset=utf-8',
+};
+function serveStatic(req, res, urlPath) {
+  let rel = decodeURIComponent(urlPath).replace(/^\/+/,'');
+  if (rel === '' ) rel = 'index.html';
+  // 防止路径穿越
+  const target = join(WWW_DIR, rel);
+  if (!target.startsWith(WWW_DIR + '/') && target !== WWW_DIR) {
+    return send(res,403,{success:false,error:'forbidden'});
+  }
+  if (!existsSync(target) || !statSync(target).isFile()) {
+    return send(res,404,{success:false,error:'not found'});
+  }
+  const ext = target.slice(target.lastIndexOf('.')) || '';
+  const body = readFileSync(target);
+  res.writeHead(200, {
+    'Content-Type': MIME[ext] || 'application/octet-stream',
+    'Content-Length': body.length,
+    'Cache-Control': 'no-cache',
+  });
+  res.end(body);
+}
+
+// ── HTTP server ────────────────────────────────────────────────
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  const pathname = url.pathname;
+
+  // 网关前缀剥离: /app/usbrsync/... → 去掉前缀
+  let p = pathname;
+
+  // 兼容两种路径: /api/xxx 或直接的 /xxx (网关前缀已剥)
+  if (p.startsWith('/app/usbrsync')) p = p.replace('/app/usbrsync','') || '/';
+
+  let apiPath = p;
+  let isApi = apiPath.startsWith('/api/');
+  try {
+    if (isApi) {
+      await handleApi(apiPath.slice(4), req, res);  // /api/status → /status
+    } else {
+      serveStatic(req, res, p);
+    }
+  } catch(e) {
+    try { log(`handler error: ${e.message}`); } catch {}
+    if (!res.headersSent) send(res,500,{success:false,error:'server error'});
+  }
+});
+
+// ── 启动 ───────────────────────────────────────────────────────
+function start() {
+  // 启动 daemon
+  const daemon = createDaemon({ loadTasks, isAllowedPath, requestSync, log });
+  daemon.start();
+
+  // 启动信号清理
+  process.on('SIGTERM', () => { daemon.stop(); try{unlinkSync(SOCK_PATH);}catch{} process.exit(0); });
+  process.on('SIGINT',  () => { daemon.stop(); try{unlinkSync(SOCK_PATH);}catch{} process.exit(0); });
+
+  return new Promise((res, rej) => {
+    if (PORT_MODE) {
+      server.listen(PORT_MODE, () => {
+        log(`usbrsync listening on http://127.0.0.1:${PORT_MODE}`);
+        debug(`listening on :${PORT_MODE}`);
+        res(server.address());
+      });
+      server.on('error', rej);
+    } else {
+      try { if (existsSync(SOCK_PATH)) unlinkSync(SOCK_PATH); } catch {}
+      server.listen(SOCK_PATH, () => {
+        log(`usbrsync listening on ${SOCK_PATH}`);
+        debug(`listening on ${SOCK_PATH}`);
+        res({ socket: SOCK_PATH });
+      });
+      server.on('error', rej);
+    }
+  });
+}
+
+function debug(m){ console.log(`[usbrsync] ${m}`); }
+
+// 启动 (cmd/main 调用)
+start().catch((e)=>{ console.error(`[usbrsync] startup failed: ${e.message}`); process.exit(1); });

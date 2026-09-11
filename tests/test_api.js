@@ -1,0 +1,127 @@
+// usbrsync-nodejs 测试套件
+// spawn 真实 Node server (端口模式) → 端到端 HTTP 验证
+// 用法: node --test tests/
+// 需要 Node 18+ (全局 fetch)
+import { test } from 'node:test';
+import assert from 'node:assert';
+import { spawn } from 'node:child_process';
+import { mkdirSync, rmSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PROJECT_DIR = join(__dirname, '..');
+const SERVER = join(PROJECT_DIR, 'ui', 'server.js');
+const TEST_PORT = 47988;
+const TEST_DATA = '/tmp/usbrsync-nodejs_test';
+const BASE = `http://127.0.0.1:${TEST_PORT}`;
+
+let server = null;
+let logTail = '';
+
+function startServer() {
+  return new Promise((resolve, reject) => {
+    rmSync(TEST_DATA, { recursive: true, force: true });
+    mkdirSync(TEST_DATA, { recursive: true });
+    server = spawn('node', [SERVER], {
+      env: { ...process.env, TRM_PKGVAR: TEST_DATA, PORT: String(TEST_PORT) },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    server.stdout.on('data', d => { logTail += d.toString(); });
+    server.stderr.on('data', d => { logTail += d.toString(); });
+    const tryReady = (n) => {
+      if (n <= 0) return reject(new Error('server start timeout:\n' + logTail));
+      healthCheck().then(resolve).catch(() => setTimeout(() => tryReady(n - 1), 300));
+    };
+    tryReady(20);
+  });
+}
+
+function healthCheck() {
+  return new Promise((resolve, reject) => {
+    const ctl = new AbortController();
+    const t = setTimeout(() => { ctl.abort(); reject(new Error('timeout')); }, 1500);
+    fetch(`${BASE}/app/usbrsync/api/status`, { signal: ctl.signal })
+      .catch(() => { clearTimeout(t); reject(new Error('conn')); })
+      .then(() => { clearTimeout(t); resolve(); });
+  });
+}
+
+function stopServer() {
+  return new Promise((resolve) => {
+    if (!server) return resolve();
+    server.on('close', () => resolve());
+    server.kill('SIGTERM');
+    setTimeout(() => { server.kill('SIGKILL'); resolve(); }, 2000);
+  });
+}
+
+async function api(path, method = 'GET', body = null) {
+  const opts = { method, headers: {} };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const resp = await fetch(`${BASE}/app/usbrsync${path}`, opts);
+  const json = await resp.json().catch(() => ({}));
+  return { status: resp.status, body: json };
+}
+
+test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
+  await startServer();
+  t.after(() => stopServer());
+
+  await t.test('status endpoint', async () => {
+    const r = await api('/api/status');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.success, true);
+    assert.strictEqual(r.body.version, '0.4.1');
+  });
+
+  await t.test('static index.html', async () => {
+    const resp = await fetch(`${BASE}/app/usbrsync/`);
+    assert.strictEqual(resp.status, 200);
+    const text = await resp.text();
+    assert.ok(text.includes('USB RSYNC'));
+  });
+
+  await t.test('static css/js', async () => {
+    const c = await fetch(`${BASE}/app/usbrsync/css/style.css`);
+    assert.strictEqual(c.status, 200);
+    const j = await fetch(`${BASE}/app/usbrsync/js/main.js`);
+    assert.strictEqual(j.status, 200);
+  });
+
+  await t.test('save + load tasks', async () => {
+    const r1 = await api('/api/tasks', 'POST', { sync_tasks: [{ id:'t1', name:'测试', source:'/tmp/a', target:'/tmp/b', keep_history:true }], exclusions: [] });
+    assert.strictEqual(r1.body.success, true);
+    const r2 = await api('/api/tasks');
+    assert.strictEqual(r2.body.tasks.sync_tasks.length, 1);
+    assert.strictEqual(r2.body.tasks.sync_tasks[0].keep_history, true);
+  });
+
+  await t.test('sync rejects bad path', async () => {
+    const r = await api('/api/sync', 'POST', { source:'/etc/passwd', target:'/tmp/b' });
+    assert.strictEqual(r.body.success, false);
+  });
+
+  await t.test('diff rejects bad path', async () => {
+    const r = await api('/api/diff?source=/etc&target=/tmp');
+    assert.strictEqual(r.body.success, false);
+  });
+
+  await t.test('browse /tmp', async () => {
+    const r = await api('/api/browse?path=/tmp');
+    assert.strictEqual(r.body.success, true);
+  });
+
+  await t.test('404 unknown api', async () => {
+    const r = await api('/api/nonexistent');
+    assert.strictEqual(r.status, 404);
+  });
+
+  await t.test('history clear + stats', async () => {
+    await api('/api/history?action=clear', 'POST', {});
+    const r = await api('/api/history');
+    assert.deepStrictEqual(r.body.history, []);
+    const s = await api('/api/stats');
+    assert.strictEqual(s.status, 200);
+  });
+});
