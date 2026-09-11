@@ -361,7 +361,20 @@ async function handleApi(pathname, req, res) {
       }
       case '/browse': {
         const dir = readQuery(req).path || '/';
-        if (!isAllowedPath(dir)) return send(res,200,{success:false,error:'path not allowed'});
+        // 浏览入口放行根目录 (/), 便于跨卷切换; 同步(/sync)仍用严格 isAllowedPath
+        if (dir !== '/' && !isAllowedPath(dir))
+          return send(res,200,{success:false,error:'path not allowed'});
+        if (dir === '/') {
+          // 动态列出根下真实卷目录 (volN / mnt / media)
+          const rootEntries = [];
+          try {
+            for (const d of readdirSync('/')) {
+              if (/^vol\d+$/.test(d)) rootEntries.push({ name:d, type:'dir' });
+            }
+          } catch {}
+          rootEntries.push({ name:'mnt', type:'dir' }, { name:'media', type:'dir' });
+          return send(res,200,{success:true, path:'/', entries:rootEntries});
+        }
         let entries=[];
         try {
           for (const d of readdirSync(dir)) {
