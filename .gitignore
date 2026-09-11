@@ -1,0 +1,7 @@
+# 打包产物不入 git (项目规则, 与 usbrsync 一致)
+*.fpk
+
+# Node/运行时杂物
+*.log
+node_modules/
+.DS_Store
