@@ -227,19 +227,28 @@ function readSyncLog(lines=200) {
 }
 function readDriveList() {
   const drives = [];
-  for (const basePath of ['/vol','/mnt','/media']) {
+  // 收集真实卷根目录: /vol1..N (无 /vol 父目录, 从根目录 glob)
+  const roots = [];
+  try {
+    for (const d of readdirSync('/')) {
+      if (/^vol\d+$/.test(d)) roots.push(join('/',d));
+    }
+  } catch {}
+  roots.push('/mnt','/media');
+  for (const p of roots) {
     try {
-      for (const d of readdirSync(basePath)) {
-        const p = join(basePath,d);
-        if (!statSync(p).isDirectory()) continue;
-        let size=0, free=0;
-        try {
-          const o = execFileSync('df',['-PB1',p]).toString().split('\n').pop();
-          const parts = o.split(/\s+/);
-          size = parseInt(parts[1]||'0',10); free = parseInt(parts[3]||'0',10);
-        } catch {}
-        drives.push({ path:p, name:d, size, free });
-      }
+      if (!statSync(p).isDirectory()) continue;
+      let size=0, free=0, mounted=false;
+      try {
+        const out = execFileSync('df',['-PB1',p]).toString().trim().split('\n');
+        const m = out[out.length-1].split(/\s+/);
+        const mp = m[5]||'';
+        if (mp === p) mounted = true;
+        if (mounted) size = parseInt(m[1]||'0',10), free = parseInt(m[3]||'0',10);
+      } catch {}
+      // 跳过非真实挂载点 (如 /media/cdrom0 空目录继承根分区)
+      if (!mounted) continue;
+      drives.push({ path:p, name:basename(p), size, free });
     } catch {}
   }
   return drives;
