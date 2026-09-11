@@ -1,10 +1,16 @@
 #!/bin/bash
 ### This script is called after the user installs the application.
-# 升级时跳过（由 upgrade_callback 处理）
+### 推送安装统计至飞书多维表格
+
+# 如果是升级触发的安装回调，跳过（由 upgrade_callback 处理）
 if [ -n "${TRIM_OLD_APPVER:-}" ]; then
     exit 0
 fi
 
-# 飞书/企业微信安装统计已停用（避免凭据硬编码泄露）
-# 原 WeCom webhook URL 已删除，参照 fnclearup A 方案
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+# shellcheck source=/dev/null
+source "${LIB_DIR}/feishu_push.sh"
+
+feishu_push_install "usbrsync" "${TRIM_APPVER}"
+
 exit 0

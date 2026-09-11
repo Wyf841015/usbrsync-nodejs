@@ -1,5 +1,11 @@
 #!/bin/bash
 ### This script is called after the user upgrades the application.
-# 飞书/企业微信升级统计已停用（避免凭据硬编码泄露）
-# 原 WeCom webhook URL 已删除，参照 fnclearup A 方案
+### 推送升级统计至飞书多维表格
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+# shellcheck source=/dev/null
+source "${LIB_DIR}/feishu_push.sh"
+
+feishu_push_upgrade "usbrsync" "${TRIM_OLD_APPVER}" "${TRIM_APPVER}"
+
 exit 0

@@ -40,4 +40,12 @@ async function showLogs(){const r=await api('/api/log?lines=500');$('result-titl
 function downloadLogs(){const b=new Blob([$('result-content').textContent],{type:'text/plain'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='usbrsync.log';a.click();URL.revokeObjectURL(a.href)}
 async function exportConfig(){const r=await fetch(BASE_URL+'/api/config_export');const b=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='usbrsync-config.json';a.click();URL.revokeObjectURL(a.href)}
 async function importConfig(input){const f=input.files[0];if(!f)return;try{const cfg=JSON.parse(await f.text());if(!Array.isArray(cfg.sync_tasks))throw new Error('配置格式错误');const r=await api('/api/config_import','POST',cfg);if(r.success){toast('配置已导入','success');loadTasks()}}catch(e){toast(e.message,'error')}input.value=''}
-window.onload=async function(){await loadAll()};
+// ── 主题切换 ──
+const THEME_KEY='usbrsync-dark';
+function applyTheme(dark){document.documentElement.classList.toggle('dark',dark);const btn=document.getElementById('themeBtn');if(btn)btn.textContent=dark?'☀️':'🌙'}
+function toggleTheme(){const dark=!document.documentElement.classList.contains('dark');applyTheme(dark);try{localStorage.setItem(THEME_KEY,dark?'1':'0')}catch(e){}}
+function initTheme(){let dark=false;try{dark=localStorage.getItem(THEME_KEY)==='1'}catch(e){}applyTheme(dark)}
+// ── 赞助 ──
+function showSponsorModal(){const o=document.getElementById('sponsorModal');if(o)o.classList.add('show')}
+function showSponsorImgFull(img){const o=document.getElementById('sponsorImgOverlay');if(o){o.classList.add('show');document.getElementById('sponsorImgFull').src=img.src}}
+window.onload=async function(){initTheme();await loadAll()};
