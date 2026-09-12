@@ -24,6 +24,7 @@ const LOG_DIR    = join(DATA_BASE,'logs');
 const TASKS_FILE = join(CONFIG_DIR,'tasks.json');
 const HISTORY_FILE = join(DATA_BASE,'history.json');
 const STATUS_FILE  = join(DATA_BASE,'sync_status.json');
+const PENDING_FILE = join(DATA_BASE,'pending_resync.json');
 const SYNCLOG  = join(LOG_DIR,'sync.log');
 const APP_LOG  = join(LOG_DIR,'usbrsync.log');
 const WWW_DIR  = join(__dirname,'www');
@@ -115,6 +116,26 @@ function appendHistory(entry) {
   try { saveHistory(h); return true; } catch { return false; }
 }
 
+// ── 待补同步 (中断后挂载恢复自动重试) ─────────────────────────
+function loadPending() { try { return JSON.parse(readFileSync(PENDING_FILE,'utf8')); } catch { return []; } }
+function savePending(a) {
+  try { const t=`${PENDING_FILE}.${process.pid}.${Date.now()}.tmp`; writeFileSync(t, JSON.stringify(a)); renameSync(t,PENDING_FILE); } catch {}
+}
+function addPending(item) {
+  const list = loadPending();
+  const idx = list.findIndex(x=>x.task_id===item.task_id);
+  const rec = { task_id:item.task_id, source:item.source, target:item.target,
+                bidirectional:item.bidirectional, use_delete:item.use_delete,
+                checksum:item.checksum, keep_history:item.keep_history, attempts:(idx>=0?list[idx].attempts:0)+1 };
+  if (idx>=0) list[idx]=rec; else list.push(rec);
+  savePending(list); log(`pending resync added: ${item.task_id} (attempt ${rec.attempts})`);
+}
+function removePending(taskId) {
+  const list = loadPending();
+  const next = list.filter(x => x.task_id !== taskId);
+  if (next.length !== list.length) { savePending(next); log(`pending resync cleared: ${taskId}`); }
+}
+
 // ── USB 设备扫描 ──────────────────────────────────────────────
 // 异步 execFile, 带 timeout 防 blkid/blockdev 挂死阻塞事件循环
 function execFileAsync(cmd, args, timeoutMs=3000) {
@@ -186,7 +207,17 @@ function requestSync(p) {
     }, { setStatus:setSyncStatus, synclog:SYNCLOG, appendHistory, notify:notifyDone });
     running = ctl;
     // 完成后清 running (startSync 返回 donePromise, 在完成时 resolve)
-    ctl.donePromise.then(() => { if (running === ctl) running = null; })
+    ctl.donePromise.then((res) => {
+      if (running === ctl) running = null;
+      if (!res) return;
+      if (res.success) {
+        removePending(p.task_id);
+      } else if (res.exit_code !== -999 && p.task_id && p.task_id.indexOf('(restore)') === -1) {
+        // 失败且非用户停止(-999) → 记入待补 (挂载恢复后 daemon 自动补, 最多3次)
+        const pm = loadPending().find(x=>x.task_id===p.task_id);
+        if (!pm || pm.attempts < 3) addPending(p);
+      }
+    })
        .catch(() => { if (running === ctl) running = null; });
     res({ status:'running', message:'同步已开始' });
   });
@@ -502,7 +533,7 @@ const server = createServer(async (req, res) => {
 // ── 启动 ───────────────────────────────────────────────────────
 function start() {
   // 启动 daemon
-  const daemon = createDaemon({ loadTasks, isAllowedPath, requestSync, log });
+  const daemon = createDaemon({ loadTasks, isAllowedPath, requestSync, log, loadPending, removePending });
   daemon.start();
 
   // 启动信号清理

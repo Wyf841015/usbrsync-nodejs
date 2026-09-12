@@ -9,7 +9,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-export function createDaemon({ loadTasks, isAllowedPath, requestSync, log }) {
+export function createDaemon({ loadTasks, isAllowedPath, requestSync, log, loadPending, removePending }) {
   let lastMounts = '';
   let lastScheduleStamp = '';
   let stopped = false;
@@ -71,6 +71,33 @@ export function createDaemon({ loadTasks, isAllowedPath, requestSync, log }) {
     }
   }
 
+  // ── 待补同步重试 (中断后挂载恢复时自动补) ────────────────────
+  async function triggerPendingResync() {
+    const list = (loadPending && loadPending()) || [];
+    if (!list.length) return;
+    const mounts = readUsbMounts();
+    const mpSet = new Set(mounts.map(m => m.mount_point));
+    let triggered = 0;
+    for (const item of list) {
+      // 源/目标任一涉及 USB 挂载点, 需该挂载点已恢复才补
+      const needUsb = [item.source, item.target].filter(p => p && !/^\/vol\d+(\/|$)/.test(p));
+      const ready = needUsb.every(p => mpSet.has(p) || [...mpSet].some(mp => p.startsWith(mp + '/')));
+      if (!ready) continue;
+      if (item.attempts >= 3) { removePending && removePending(item.task_id); continue; }
+      log(`pending resync triggered: ${item.task_id} (挂载已恢复, 尝试 ${item.attempts})`);
+      try {
+        await requestSync({
+          source: item.source, target: item.target, bidirectional: !!item.bidirectional,
+          use_delete: !!item.use_delete, task_id: item.task_id, retry_count: 0,
+          retry_delay: 5, checksum: !!item.checksum, keep_history: !!item.keep_history,
+          notify: true, auto: true, pending_retry: true,
+        });
+        triggered++;
+      } catch (e) { log(`pending resync error: ${e.message}`); }
+    }
+    if (triggered) log(`pending resync: ${triggered} task(s) re-triggered`);
+  }
+
   // ── 获取设备 UUID (blkid) ────────────────────────────────────
   function getUuid(device) {
     return new Promise((res) => {
@@ -127,6 +154,8 @@ export function createDaemon({ loadTasks, isAllowedPath, requestSync, log }) {
             const mp = m.split('|')[1];
             if (mp) { log(`new USB mount: ${mp}`); triggerAutoSync(mp); }
           }
+          // 有新的 USB 挂载出现 → 补试被中断的待补同步
+          if (newMounts.length) triggerPendingResync();
         }
         lastMounts = cur;
       }

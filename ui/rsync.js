@@ -142,6 +142,7 @@ function execRsync(child, synclog, onProgress) {
     });
     child.stderr.on('data', (d) => {
       touch();
+      out += d.toString();  // stderr 也收进 out 用于失败原因判断 (如 change_dir failed)
       if (synclog) { try { appendFileSync(synclog, d.toString()); } catch {} }
     });
     child.on('error', (e) => {
@@ -179,6 +180,7 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
     let exitCode = -1;
     let attempt = 0;
     let out = '';
+    let deadEncountered = false;  // 源/目标不可用 (USB拔出等), 即使 code 为 23 也算失败
     if (_hook?.log) _hook.log(`startSync cmd: ${cmd.join(' ')}`);
     for (attempt = 1; attempt <= maxRetry + 1; attempt++) {
       if (attempt > 1) setStatus('syncing', 0, '', `第 ${attempt} 次尝试`, '', 0);
@@ -187,7 +189,11 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
       const r = await execRsync(child, synclog, (p) => setStatus('syncing', p.pct, p.file, p.file, p.speed, 0));
       if (_hook?.log) _hook.log(`rsync attempt ${attempt} finished code=${r.code}`);
       if (stopRequested) break;
-      if ([0,23,24].includes(r.code)) { exitCode = r.code; out = r.out; break; }
+      // 23 可能是部分传输失败 —— 若 stderr 显示源/目标不可用 (USB拔出等), 判为失败并停止重试
+      const deadMark = /change_dir .* failed|No such file or directory/.test(r.out);
+      if (deadMark) deadEncountered = true;
+      if ([0,24].includes(r.code) || (r.code === 23 && !deadMark)) { exitCode = r.code; out = r.out; break; }
+      if (deadMark) break;  // 源/目标不可用, 立即重试无意义, 交待补机制处理
       if (attempt <= maxRetry) {
         setStatus('syncing', 0, '', `第 ${attempt} 次失败，${retryDelay} 秒后重试`, '', 0);
         await new Promise((r2) => setTimeout(r2, retryDelay * 1000));
@@ -210,6 +216,7 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
     // 结果判定
     let success = false, msg, level = 2;
     if (stopRequested) { success = false; msg = '已停止'; level = 2; }
+    else if (exitCode === -1 && deadEncountered) { success = false; msg = '源/目标不可用 (设备可能已拔出)'; }
     else if ([0,23,24].includes(exitCode)) { success = true; msg = '同步完成'; level = 0; }
     else { msg = `同步失败 (rsync exit ${exitCode})`; }
 
