@@ -1,5 +1,11 @@
 #!/bin/bash
 
 ### This script is called after the user uninstalls the application.
+### wizard 卸载向导选择的 wizard_data_action 会作为环境变量传入。
+
+# 根据 wizard_data_action 决定是否删除应用数据
+if [ "${wizard_data_action:-}" = "delete" ]; then
+    rm -rf "${TRIM_PKGVAR}" 2>/dev/null || true
+fi
 
 exit 0

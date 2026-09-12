@@ -1,0 +1,19 @@
+[
+    {
+        "stepTitle": "安装说明",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "USB自动同步：检测到USB存储设备插入后，自动将指定目录同步到USB设备。<br/><strong>使用步骤：</strong>"
+            },
+            {
+                "type": "tips",
+                "helpText": "1. 插入USB存储设备（U盘/移动硬盘）<br/>2. 打开应用，在「任务管理」中新建同步任务<br/>3. 设置源目录和目标USB设备目录，选择同步模式（单向/双向）<br/>4. 应用会自动检测USB设备插入并执行同步"
+            },
+            {
+                "type": "tips",
+                "helpText": "<strong>支持：</strong> 单向同步、双向同步、计划任务（每日/每周）、同步历史统计、预览 diff。"
+            }
+        ]
+    }
+]
