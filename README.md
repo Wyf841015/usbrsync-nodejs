@@ -78,8 +78,10 @@ fnpack build .
 
 ### v0.4.1 (Node.js 重写)
 
-- **架构**: bash CGI + bash 守护 → 纯 Node.js 单进程
+- **架构**: bash CGI + bash 守护 → 纯 Node 单进程（HTTP + daemon + USB 监控 + 计划调度，零 npm 依赖）
 - 保留全部功能: 任务/自动同步/计划/双向/恢复/对比/保留历史/exFAT/通知
+- **新增**: 源/目标可用性实时检测（USB 拔出判定）+ **中断自动补同步**（rsync 失败且非用户停止 → 记 pending，USB 重新挂载后 daemon 自动补同步，最多 3 次）
+- **修复**: rsync exit 23 的"部分传输"误判（USB 拔出导致源/目标不可用时正确判失败，不再误报完成）
 
 ## 维护者
 
