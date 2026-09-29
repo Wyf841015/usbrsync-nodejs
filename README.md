@@ -1,4 +1,4 @@
-# USB Rsync — Node.js 版 (v0.4.1)
+# USB Rsync — Node.js 版 (v0.4.2)
 
 > USB 存储设备自动同步工具，检测到 USB 设备插入后自动同步指定目录，支持单向和双向同步模式。
 > **Node.js 重写版** — 由 bash CGI + bash 守护架构迁移为纯 Node.js 单进程架构。
@@ -75,6 +75,12 @@ fnpack build .
 - `logs/sync.log` — rsync 日志
 
 ## 版本历史
+
+### v0.4.2
+
+- **安全**: 移除 root 运行（`config/privilege` 改为 `run-as: package`），与其他应用对齐 —— 消除 Web 层漏洞即等于 root 的风险。经核实无特权依赖：仅读 `/proc/mounts`（全局可读）、`blkid`（非特权可执行）、普通文件 `rsync`（未用 `--devices`）
+- **新增**: 顶部「联系作者」按钮（主题按钮之后），弹窗展示 QQ 群号，支持点击群号或按钮复制
+- **改进**: 复制走三级降级（clipboard → execCommand → 自动选中），成功/失败均有文字反馈，适配 fnOS WebView 非安全上下文
 
 ### v0.4.1 (Node.js 重写)
 

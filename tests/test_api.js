@@ -2,10 +2,14 @@
 // spawn 真实 Node server (端口模式) → 端到端 HTTP 验证
 // 用法: node --test tests/
 // 需要 Node 18+ (全局 fetch)
+
+// 版本号以 manifest 为准, 升版无需改测试
+const MANIFEST_VERSION = readFileSync(new URL('../manifest', import.meta.url), 'utf8')
+  .match(/^version\s+=\s+(\S+)\s*$/m)[1];
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -72,7 +76,7 @@ test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
     const r = await api('/api/status');
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.body.success, true);
-    assert.strictEqual(r.body.version, '0.4.1');
+    assert.strictEqual(r.body.version, MANIFEST_VERSION);
   });
 
   await t.test('static index.html', async () => {

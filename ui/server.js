@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-// USB Rsync — Node.js 重写版 (v0.4.1) — 入口
+// USB Rsync — Node.js 重写版 (v0.4.2) — 入口
 // 单进程: HTTP server(静态+API) + USB监控守护 + 计划调度
 // 零 npm 依赖
 // ═══════════════════════════════════════════════════════════════
@@ -15,7 +15,7 @@ import { createDaemon } from './daemon.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
-const VERSION = '0.4.1';
+const VERSION = '0.4.2';
 
 // ── 数据目录 ───────────────────────────────────────────────────
 const DATA_BASE = process.env.TRM_PKGVAR || '/tmp/usbrsync-nodejs';
