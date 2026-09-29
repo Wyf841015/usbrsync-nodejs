@@ -42,7 +42,7 @@ async function exportConfig(){const c=new AbortController(),t=setTimeout(()=>c.a
 async function importConfig(input){const f=input.files[0];if(!f)return;try{const cfg=JSON.parse(await f.text());if(!Array.isArray(cfg.sync_tasks))throw new Error('配置格式错误');const r=await api('/api/config_import','POST',cfg);if(r.success){toast('配置已导入','success');loadTasks()}}catch(e){toast(e.message,'error')}input.value=''}
 // ── 主题切换 ──
 const THEME_KEY='usbrsync-dark';
-function applyTheme(dark){document.documentElement.classList.toggle('dark',dark);const btn=document.getElementById('themeBtn');if(btn)btn.textContent=dark?'☀️':'🌙'}
+function applyTheme(dark){document.documentElement.classList.toggle('dark',dark);const btn=document.getElementById('themeBtn');if(btn)btn.textContent=dark?'☀️ 浅色':'🌙 主题'}
 function toggleTheme(){const dark=!document.documentElement.classList.contains('dark');applyTheme(dark);try{localStorage.setItem(THEME_KEY,dark?'1':'0')}catch(e){}}
 function initTheme(){let dark=false;try{dark=localStorage.getItem(THEME_KEY)==='1'}catch(e){}applyTheme(dark)}
 // ── 赞助 ──
