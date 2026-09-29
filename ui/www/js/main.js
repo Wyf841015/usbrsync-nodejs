@@ -46,6 +46,28 @@ function applyTheme(dark){document.documentElement.classList.toggle('dark',dark)
 function toggleTheme(){const dark=!document.documentElement.classList.contains('dark');applyTheme(dark);try{localStorage.setItem(THEME_KEY,dark?'1':'0')}catch(e){}}
 function initTheme(){let dark=false;try{dark=localStorage.getItem(THEME_KEY)==='1'}catch(e){}applyTheme(dark)}
 // ── 赞助 ──
+function showContactModal(){const o=document.getElementById('contactModal');if(o){o.classList.add('show');const n=document.getElementById('qqNumber');if(n){n.textContent='745565752';n.style.color='';}}}
+// 复制 QQ 群号: clipboard -> execCommand(带 focus, CEF 必需) -> 手动选中
+// 每一级都给出可见反馈, 绝不静默失败 (fnOS WebView 走 http 时 clipboard 为 undefined)
+function copyQQNumber(){
+  const qq='745565752',el=$('qqNumber');
+  const feedback=ok=>{if(!el)return;const orig=el.textContent;
+    el.textContent=ok?'✓ 已复制':'复制失败,请长按选中后手动复制';
+    el.style.color=ok?'var(--green)':'var(--gold)';
+    setTimeout(()=>{el.textContent=orig;el.style.color='';},2000);};
+  const manual=()=>{try{if(el){const r=document.createRange();r.selectNodeContents(el);
+    const sel=window.getSelection&&window.getSelection();if(sel){sel.removeAllRanges();sel.addRange(r);}}}catch(e){}feedback(false);};
+  const exec=()=>{let ta=null;
+    try{ta=document.getElementById('__qqCopyTa');
+      if(!ta){ta=document.createElement('textarea');ta.id='__qqCopyTa';ta.value=qq;ta.setAttribute('readonly','');
+        ta.style.cssText='position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;z-index:99999';
+        document.body.appendChild(ta);}
+      ta.focus();ta.select();ta.setSelectionRange(0,qq.length);
+      if(document.execCommand('copy')){ta.remove();return feedback(true);}}catch(e){}
+    if(ta&&ta.remove){try{ta.remove();}catch(e){}}manual();};
+  try{if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(qq).then(()=>feedback(true)).catch(exec);}else{exec();}}
+  catch(e){exec();}
+}
 function showSponsorModal(){const o=document.getElementById('sponsorModal');if(o)o.classList.add('show')}
 function showSponsorImgFull(img){const o=document.getElementById('sponsorImgOverlay');if(o){o.classList.add('show');document.getElementById('sponsorImgFull').src=img.src}}
 window.onload=async function(){initTheme();await loadAll();window._lastHistRefresh=Date.now();startSyncMonitor()};

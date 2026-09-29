@@ -134,7 +134,7 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
 .toast.error{border-color:#8d3944}
 
 /* ── 移动端 ── */
-@media(max-width:760px){.hc{align-items:flex-start;flex-direction:column}.header-actions{width:100%;overflow:visible;flex-wrap:wrap;gap:6px;padding-bottom:2px}.header-actions .btn,.header-actions .sponsor-btn,.header-actions .theme-btn,.header-actions .hs{flex-shrink:0;white-space:nowrap}.header-actions .hs{flex-basis:100%;max-width:100%;margin-right:0}.kpis{grid-template-columns:1fr 1fr}.g{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}.span2{grid-column:auto}.history-row{grid-template-columns:50px 1fr}.history-row code{display:none}.ct{padding:12px}.card{padding:13px}}
+@media(max-width:760px){.hc{align-items:flex-start;flex-direction:column}.header-actions{width:100%;overflow:visible;flex-wrap:wrap;gap:6px;padding-bottom:2px}.header-actions .btn,.header-actions .sponsor-btn,.header-actions .theme-btn,.header-actions .contact-btn,.header-actions .hs{flex-shrink:0;white-space:nowrap}.header-actions .hs{flex-basis:100%;max-width:100%;margin-right:0}.kpis{grid-template-columns:1fr 1fr}.g{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}.span2{grid-column:auto}.history-row{grid-template-columns:50px 1fr}.history-row code{display:none}.ct{padding:12px}.card{padding:13px}}
 @media(max-width:430px){.kpis{gap:7px}.kpis article{padding:12px}.kpis b{font-size:17px}.task-actions .btn{flex:1}.modal{padding:0}.mc,.mc.wide{height:100vh;max-height:none;border:0}.btn-group{position:sticky;bottom:0;background:var(--panel);padding-top:10px}.header-actions .btn{padding:6px 9px}.header-actions .hs{align-self:flex-start}.hc{padding:10px 14px}.hc h1{font-size:16px}}
 
 /* ══ 以下为赞助 + 主题 (追加, 保持既有 class) ══ */
@@ -204,3 +204,24 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
 .sponsor-img-full-overlay.show{display:flex}
 .sponsor-img-full-overlay img{max-width:92vw;max-height:92vh;border-radius:12px;cursor:zoom-out}
 :root:not(.dark) .sponsor-modal-content{background:#fff;border-color:#c7d2e0}
+
+/* ── 联系作者按钮 + 弹窗 ── */
+.contact-btn{display:inline-flex;align-items:center;gap:5px;padding:8px 14px;border-radius:9999px;cursor:pointer;font-size:12px;font-weight:600;color:#0b3d52;background:linear-gradient(135deg,#a5f3fc,#67e8f9);border:1px solid #22d3ee;box-shadow:0 2px 8px rgba(34,211,238,.22);transition:transform .25s,box-shadow .25s;white-space:nowrap}
+.contact-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(34,211,238,.38)}
+:root.dark .contact-btn{color:#083344;background:linear-gradient(135deg,#22d3ee,#06b6d4);border-color:#0e7490}
+:root.dark .contact-btn:hover{box-shadow:0 4px 14px rgba(14,116,144,.45)}
+.contact-modal-overlay{display:none;position:fixed;inset:0;background:rgba(1,7,14,.82);z-index:150;align-items:center;justify-content:center;padding:16px}
+.contact-modal-overlay.show{display:flex}
+.contact-modal-content{background:var(--panel);border:1px solid #315172;border-radius:16px;padding:26px;max-width:400px;width:min(400px,100%);text-align:center;box-shadow:0 20px 48px rgba(0,0,0,.5);animation:spon-in .3s cubic-bezier(.34,1.56,.64,1)}
+.contact-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.contact-header h3{margin:0;font-size:17px}
+.contact-modal-close{border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:2px 6px;line-height:1}
+.contact-modal-close:hover{color:var(--text)}
+.contact-sub{margin:0 0 18px;font-size:13px;color:var(--muted);line-height:1.6}
+.qq-box{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:18px 12px;margin-bottom:14px}
+.qq-num{font-size:30px;font-weight:800;letter-spacing:2px;color:var(--blue);cursor:pointer;user-select:all;padding:6px 10px;transition:color .25s}
+.qq-num:hover{color:var(--cyan)}
+.qq-hint{margin:6px 0 0;font-size:11px;color:var(--muted)}
+.contact-copy-btn{width:100%;padding:10px;border-radius:var(--r-md);cursor:pointer;font-size:13px;font-weight:600;color:#0b3d52;background:linear-gradient(135deg,#a5f3fc,#67e8f9);border:1px solid #22d3ee;transition:transform .25s,box-shadow .25s}
+.contact-copy-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(34,211,238,.38)}
+:root.dark .contact-copy-btn{color:#083344;background:linear-gradient(135deg,#22d3ee,#06b6d4);border-color:#0e7490}
