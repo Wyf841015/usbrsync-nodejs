@@ -182,7 +182,7 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
 
 /* ── 主题按钮 ── */
 .theme-btn{width:38px;height:38px;border-radius:9999px;cursor:pointer;font-size:16px;background:linear-gradient(135deg,#4f46e5,#7c3aed);border:1px solid transparent;color:#fff;display:inline-flex;align-items:center;justify-content:center;transition:transform .25s,box-shadow .25s;box-shadow:0 2px 8px rgba(79,70,229,.25)}
-.theme-btn:hover{transform:translateY(-1px) rotate(12deg);box-shadow:0 4px 14px rgba(79,70,229,.4)}
+.theme-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(79,70,229,.4)}
 :root.dark .theme-btn{background:linear-gradient(135deg,#4f46e5,#a855f7)}
 
 /* ── 赞助弹窗 ── */
@@ -262,12 +262,10 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
   flex-shrink:0;
   box-sizing:border-box;
 }
-/* 主题按钮倾斜: 浅色 0deg → 深色 12deg 倾斜, 悬停 24deg, 按下压扁 */
-.header-actions .theme-btn{transform:rotate(0deg);transition:transform .35s cubic-bezier(.34,1.56,.64,1),box-shadow .25s}
-:root.dark .header-actions .theme-btn{transform:rotate(12deg)}
-.header-actions .theme-btn:hover{transform:translateY(-1px) rotate(24deg);box-shadow:0 4px 14px rgba(79,70,229,.4)}
-:root.dark .header-actions .theme-btn:hover{transform:translateY(-1px) rotate(26deg)}
-.header-actions .theme-btn:active{transform:translateY(0) scale(.92) rotate(30deg);box-shadow:0 1px 4px rgba(79,70,229,.3);transition-duration:.08s}
+/* 主题按钮: 已取消倾斜(旋转)效果, 仅保留上浮与按下压缩的常规反馈 */
+.header-actions .theme-btn{transform:none;transition:transform .25s,box-shadow .25s}
+.header-actions .theme-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(79,70,229,.4)}
+.header-actions .theme-btn:active{transform:scale(.92);box-shadow:0 1px 4px rgba(79,70,229,.3);transition-duration:.08s}
 
 /* 次级按钮(日志/导出)浅色底, 主按钮(导入)保留蓝色渐变 */
 .header-actions .btn.bs{border-color:var(--line);background:var(--panel2);color:var(--text)}
