@@ -15,6 +15,18 @@ export function createDaemon({ loadTasks, isAllowedPath, requestSync, log, loadP
   let stopped = false;
 
   // ── 读取 /proc/mounts 中的 USB 设备 ──────────────────────────
+// 原逻辑只匹配 /^\/dev\/sd/ + /(vfat|ntfs|exfat|fuseblk|ext)/, 会把 NAS 自身的
+// SATA 盘一并识别成 USB (实测 /dev/sdc2 系统盘 ext4 曾被误报)。
+// 改用内核权威属性 /sys/block/<name>/removable: 1=可移动(USB/读卡器), 0=SATA/NVMe 固定盘。
+// 另排除挂载在 /volN 下的 fnOS 内部卷作为双保险。
+function isUsbRemovable(device, mountPoint) {
+  if (/^\/vol\d+(\/|$)/.test(mountPoint)) return false;
+  const name = String(device).replace(/^\/dev\//, '');
+  try {
+    if (readFileSync('/sys/block/' + name + '/removable', 'utf8').trim() !== '1') return false;
+  } catch { return false; }
+  return true;
+}
   function readUsbMounts() {
     try {
       const mounts = readFileSync('/proc/mounts','utf8').split('\n');
@@ -26,6 +38,7 @@ export function createDaemon({ loadTasks, isAllowedPath, requestSync, log, loadP
         // 匹配 USB 块设备文件系统
         if (!/^\/dev\/sd/.test(dev)) continue;
         if (!/(vfat|ntfs|exfat|fuseblk|ext)/.test(fs)) continue;
+        if (!isUsbRemovable(dev, mp)) continue;   // 排除 SATA 固定盘(removable=0)
         result.push({ device: dev, mount_point: mp, fs_type: fs });
       }
       return result.sort((a,b)=>a.device.localeCompare(b.device));

@@ -1,4 +1,4 @@
-let tasks=[],devices=[],editing=-1,browseField='',currentPath='/';let syncStatusTimer=null;
+let tasks=[],devices=[],editing=-1,browseField='',currentPath='/';let browseMode='field',pendingSaveKind='';let syncStatusTimer=null;
 const BASE_URL=window.location.pathname.match(/^\/app\/[^/]+/)?window.location.pathname.match(/^\/app\/[^/]+/)[0]:'';
 const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,method='GET',body){const c=new AbortController(),timer=setTimeout(()=>c.abort(),15000);try{const r=await fetch(BASE_URL+path,{method,headers:{'Content-Type':'application/json'},body:body==null?undefined:JSON.stringify(body),signal:c.signal});const d=await r.json();if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);return d}catch(e){toast(e.name==='AbortError'?'请求超时':e.message,'error');return{success:false,error:e.message}}finally{clearTimeout(timer)}}
@@ -33,12 +33,33 @@ function updateSyncUI(s={}){let el=$('sync-progress');if(s.status==='syncing'){l
 async function stopSync(){if(!confirm('停止当前同步？'))return;await api('/api/sync_stop','POST',{});updateSyncUI({status:'idle',message:'已停止'})}
 async function loadHistory(){const [r,s]=await Promise.all([api('/api/history'),api('/api/stats')]);$('k-success').textContent=s.ok||0;$('k-bytes').textContent=size(s.bytes);$('history').innerHTML=(r.history||[]).slice().reverse().map(h=>`<div class="history-row"><span class="status ${h.success?'ok':'bad'}">${h.success?'成功':'失败'}</span><div><b>${esc(h.source)} → ${esc(h.target)}</b><small>${new Date((h.finished_at||0)*1000).toLocaleString()} · ${h.files||0} 文件 · ${size(h.bytes)} · ${duration(h.duration)} · 尝试 ${h.attempts||1} 次${h.diff_bytes!==undefined?` · 剩余差异 ${h.synced?'0 B':'<span class="danger">'+size(h.diff_bytes)+'</span>'}`:''}</small></div><code>${esc(h.exit_code??'-')}</code></div>`).join('')||'<div class="nd">暂无同步历史</div>'}
 async function clearHistory(){if(!confirm('清空全部同步历史？'))return;await api('/api/history?action=clear','POST',{});loadHistory()}
-function openBrowse(field){browseField=field;currentPath=$('f-'+field).value||'/vol1';$('browse-modal').style.display='flex';loadBrowse(encodeURIComponent(currentPath))}
+function openBrowse(field){browseMode='field';browseField=field;$('browse-title').textContent='选择目录';$('browse-confirm').textContent='选择当前目录';currentPath=$('f-'+field).value||'/vol1';$('browse-modal').style.display='flex';loadBrowse(encodeURIComponent(currentPath))}
 async function loadBrowse(encPath){const r=await api('/api/browse?path='+encPath);if(!r.success)return;$('browse-path').textContent=r.path;currentPath=r.path;let up=currentPath==='/'?'':`<button class="browse-item" onclick="loadBrowse('${encodeURIComponent(currentPath.replace(/\/$/,'').split('/').slice(0,-1).join('/')||'/')}')">↑ 返回上级</button>`;$('browse-list').innerHTML=up+(r.entries||[]).filter(x=>x.type==='dir').map(x=>`<button class="browse-item" onclick="loadBrowse('${encodeURIComponent((currentPath==='/'?'':currentPath)+'/'+x.name)}')">📁 ${esc(x.name)}</button>`).join('')}
-function confirmBrowse(){$('f-'+browseField).value=currentPath;closeBrowse()}function closeBrowse(){$('browse-modal').style.display='none'}
+function confirmBrowse(){
+  if(browseMode==='save'){const dir=currentPath;closeBrowse();savePendingTo(dir);}
+  else{$('f-'+browseField).value=currentPath;closeBrowse();}
+}
+// 导出/下载日志: 先弹目录选择器, 再由用户指定保存位置(不再落到浏览器默认下载目录)
+function openSaveBrowse(kind){browseMode='save';pendingSaveKind=kind;
+  $('browse-title').textContent=kind==='log'?'选择日志保存目录':'选择配置保存目录';
+  $('browse-confirm').textContent=kind==='log'?'保存到此处':'保存到此处';
+  currentPath='/vol1/1000';$('browse-modal').style.display='flex';
+  loadBrowse(encodeURIComponent(currentPath));}
+async function savePendingTo(dir){
+  try{
+    let r;
+    if(pendingSaveKind==='log'){
+      r=await api('/api/save_file','POST',{dir,kind:'log',content:$('result-content').textContent});
+    }else{
+      r=await api('/api/save_file','POST',{dir,kind:'config'});
+    }
+    if(r.success){toast('已保存到 '+r.path,'success');}
+    else{toast(r.error||'保存失败','error');}
+  }catch(e){toast(e.message,'error');}
+}function closeBrowse(){$('browse-modal').style.display='none'}
 async function showLogs(){const r=await api('/api/log?lines=500');$('result-title').textContent='同步日志';$('result-summary').innerHTML=`<b>${r.lines||0} 行</b><button class="btn bs btn-sm" onclick="downloadLogs()">下载日志</button>`;$('result-content').textContent=(r.log||[]).join('\n');$('result-modal').style.display='flex'}
-function downloadLogs(){const b=new Blob([$('result-content').textContent],{type:'text/plain'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='usbrsync.log';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{a.remove();URL.revokeObjectURL(a.href)},1000);toast('日志已下载','success')}
-async function exportConfig(){const c=new AbortController(),t=setTimeout(()=>c.abort(),15000);try{const r=await fetch(BASE_URL+'/api/config_export',{signal:c.signal});if(!r.ok)throw new Error('导出失败');const b=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='usbrsync-config.json';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{a.remove();URL.revokeObjectURL(a.href)},1000);toast('配置已导出','success')}catch(e){toast(e.name==='AbortError'?'导出超时':e.message,'error')}finally{clearTimeout(t)}}
+function downloadLogs(){openSaveBrowse('log')}
+async function exportConfig(){openSaveBrowse('config')}
 async function importConfig(input){const f=input.files[0];if(!f)return;try{const cfg=JSON.parse(await f.text());if(!Array.isArray(cfg.sync_tasks))throw new Error('配置格式错误');const r=await api('/api/config_import','POST',cfg);if(r.success){toast('配置已导入','success');loadTasks()}}catch(e){toast(e.message,'error')}input.value=''}
 // ── 主题切换 ──
 const THEME_KEY='usbrsync-dark';

@@ -149,6 +149,20 @@ function execFileAsync(cmd, args, timeoutMs=3000) {
     } catch { clearTimeout(timer); res(''); }
   });
 }
+// ── 真 USB 判定 ────────────────────────────────────────────────
+// 原逻辑只匹配 /^\/dev\/sd/ + /(vfat|ntfs|exfat|fuseblk|ext)/, 会把 NAS 自身的
+// SATA 盘一并识别成 USB (实测 /dev/sdc2 系统盘 ext4 曾被误报)。
+// 改用内核权威属性 /sys/block/<name>/removable: 1=可移动(USB/读卡器), 0=SATA/NVMe 固定盘。
+// 另排除挂载在 /volN 下的 fnOS 内部卷作为双保险。
+function isUsbRemovable(device, mountPoint) {
+  if (/^\/vol\d+(\/|$)/.test(mountPoint)) return false;
+  const name = String(device).replace(/^\/dev\//, '');
+  try {
+    if (readFileSync('/sys/block/' + name + '/removable', 'utf8').trim() !== '1') return false;
+  } catch { return false; }
+  return true;
+}
+
 async function scanUsbDevices() {
   const devs = [];
   try {
@@ -158,6 +172,7 @@ async function scanUsbDevices() {
       const device=parts[0], mp=parts[1], fs=parts[2];
       if (!/^\/dev\/sd/.test(device)) continue;
       if (!/(vfat|ntfs|exfat|fuseblk|ext)/.test(fs)) continue;
+      if (!isUsbRemovable(device, mp)) continue;   // 排除 SATA 固定盘(removable=0)
       let uuid='', label='', size='0';
       // 异步 + 超时, 避免挂起设备冻结事件循环
       uuid  = await execFileAsync('blkid',['-s','UUID','-o','value',device]);
@@ -418,6 +433,23 @@ async function handleApi(pathname, req, res) {
       }
       case '/config_export':
         send(res,200, loadTasks(), { download:'usbrsync-config.json' }); return;
+      case '/save_file': {
+        if (method !== 'POST') return send(res,405,{success:false,error:'POST required'});
+        try {
+          const o=JSON.parse(body||'{}');
+          const dir=String(o.dir||''), kind=(o.kind==='log'?'log':'config');
+          if (!isAllowedPath(dir)) return send(res,200,{success:false,error:'目标目录不在允许范围内'});
+          // 文件名固定, 不接受外部传入, 防目录穿越
+          const fname = kind==='log' ? 'usbrsync.log' : 'usbrsync-config.json';
+          const target = join(dir, fname);
+          const content = kind==='log'
+            ? String(o.content||'')
+            : JSON.stringify(loadTasks(), null, 2);
+          writeFileSync(target, content, 'utf8');
+          send(res,200,{success:true, path:target, size:Buffer.byteLength(content,'utf8')});
+        } catch(e) { send(res,200,{success:false,error:'保存失败: '+e.message}); }
+        return;
+      }
       case '/config_import': {
         try { const o=JSON.parse(body||'{}'); if (!o.sync_tasks) throw new Error('invalid');
           saveTasks(o); send(res,200,{success:true}); }
