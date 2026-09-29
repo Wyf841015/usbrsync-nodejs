@@ -262,6 +262,13 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
   flex-shrink:0;
   box-sizing:border-box;
 }
+/* 主题按钮倾斜: 浅色 0deg → 深色 12deg 倾斜, 悬停 24deg, 按下压扁 */
+.header-actions .theme-btn{transform:rotate(0deg);transition:transform .35s cubic-bezier(.34,1.56,.64,1),box-shadow .25s}
+:root.dark .header-actions .theme-btn{transform:rotate(12deg)}
+.header-actions .theme-btn:hover{transform:translateY(-1px) rotate(24deg);box-shadow:0 4px 14px rgba(79,70,229,.4)}
+:root.dark .header-actions .theme-btn:hover{transform:translateY(-1px) rotate(26deg)}
+.header-actions .theme-btn:active{transform:translateY(0) scale(.92) rotate(30deg);box-shadow:0 1px 4px rgba(79,70,229,.3);transition-duration:.08s}
+
 /* 次级按钮(日志/导出)浅色底, 主按钮(导入)保留蓝色渐变 */
 .header-actions .btn.bs{border-color:var(--line);background:var(--panel2);color:var(--text)}
 .header-actions .btn.bp{background:linear-gradient(135deg,var(--blue),#5b8bff);color:#fff;border-color:transparent}
