@@ -1,103 +1,78 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-// USB Rsync — 后台守护 (Node.js v0.4.1)
-// 替代原 bash cmd/main:
-//   - mount_monitor: 轮询 /proc/mounts 检测 USB 设备插拔
+// USB Rsync — 后台守护
+//   - mount_monitor: 轮询 USB 挂载变化（检测逻辑统一在 ui/usb.js）
 //   - trigger_auto_sync: UUID 绑定 + auto_sync_on_insert 任务触发
-//   - trigger_scheduled_sync: 每分钟计划任务 (daily/weekly)
+//   - trigger_pending_resync: 设备回来后补做被中断的同步
+//   - trigger_scheduled_sync: 每分钟检查计划任务 (daily/weekly)
 // ═══════════════════════════════════════════════════════════════
-import { execFile, spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { collectUsbMounts, mountSignature, diffMounts, pathReady } from './usb.js';
 
-export function createDaemon({ loadTasks, isAllowedPath, requestSync, log, loadPending, removePending }) {
+const POLL_MS = Number(process.env.USBR_SYNC_POLL_MS || 5000);
+// 挂载出现后先等设备稳定再触发（文件系统刚挂上时可能还在恢复，blkid 也未必就绪）
+const SETTLE_MS = Number(process.env.USBR_SYNC_SETTLE_MS || 2000);
+
+export function createDaemon({ loadTasks, isAllowedPath, requestSync, log, loadPending, removePending,
+                              scanUsb = collectUsbMounts, pollMs = POLL_MS, settleMs = SETTLE_MS }) {
   let lastMounts = '';
   let lastScheduleStamp = '';
   let stopped = false;
+  let running = false;
+  let timer = null;
 
-  // ── 读取 /proc/mounts 中的 USB 设备 ──────────────────────────
-// 原逻辑只匹配 /^\/dev\/sd/ + /(vfat|ntfs|exfat|fuseblk|ext)/, 会把 NAS 自身的
-// SATA 盘一并识别成 USB (实测 /dev/sdc2 系统盘 ext4 曾被误报)。
-// 改用内核权威属性 /sys/block/<name>/removable: 1=可移动(USB/读卡器), 0=SATA/NVMe 固定盘。
-// 另排除挂载在 /volN 下的 fnOS 内部卷作为双保险。
-function isUsbRemovable(device, mountPoint) {
-  if (/^\/vol\d+(\/|$)/.test(mountPoint)) return false;
-  const name = String(device).replace(/^\/dev\//, '');
-  try {
-    if (readFileSync('/sys/block/' + name + '/removable', 'utf8').trim() !== '1') return false;
-  } catch { return false; }
-  return true;
-}
-  function readUsbMounts() {
-    try {
-      const mounts = readFileSync('/proc/mounts','utf8').split('\n');
-      const result = [];
-      for (const line of mounts) {
-        const parts = line.split(' ');
-        if (parts.length < 3) continue;
-        const dev = parts[0], mp = parts[1], fs = parts[2];
-        // 匹配 USB 块设备文件系统
-        if (!/^\/dev\/sd/.test(dev)) continue;
-        if (!/(vfat|ntfs|exfat|fuseblk|ext)/.test(fs)) continue;
-        if (!isUsbRemovable(dev, mp)) continue;   // 排除 SATA 固定盘(removable=0)
-        result.push({ device: dev, mount_point: mp, fs_type: fs });
-      }
-      return result.sort((a,b)=>a.device.localeCompare(b.device));
-    } catch { return []; }
-  }
-  function mountsSignature() {
-    return readUsbMounts().map(m => `${m.device}|${m.mount_point}`).join('\n');
-  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // ── 读取任务列表 (含 auto_sync_on_insert 触发所需字段) ───────
+  // ── 读取任务列表 ─────────────────────────────────────────────
   function readTasks() {
     try { return loadTasks(); } catch { return { sync_tasks: [] }; }
   }
 
   // ── 触发自动同步 (USB 插入) ─────────────────────────────────
-  async function triggerAutoSync(mountPoint) {
+  async function triggerAutoSync(mounts, mountPoint, firedTaskIds) {
     const tasks = readTasks();
     if (!tasks.sync_tasks?.length) return;
-    // 找出挂了该挂载点的设备 UUID
-    let mountedUuid = null;
-    const mounts = readUsbMounts().find(m => m.mount_point === mountPoint);
-    if (mounts && mounts.device) {
-      mountedUuid = await getUuid(mounts.device);
-    }
+    const mounted = (mounts || []).find((m) => m.mount_point === mountPoint);
+    const mountedUuid = mounted?.uuid || null;
+
     for (const task of tasks.sync_tasks) {
       if (task.enabled === false) continue;
       if (task.auto_sync_on_insert !== true) continue;
       if (!task.source || !task.target) continue;
-      // UUID 绑定校验
+      // UUID 绑定校验：绑定过的设备必须 UUID 对上
       if (task.device_uuid && (!mountedUuid || mountedUuid !== task.device_uuid)) continue;
-      // 源目录必须包含挂载点 (用前缀匹配, 防 substring 误判: /vol1/usbX vs /vol1/usbX2)
+      // 源目录必须在挂载点内（边界匹配，防 /vol1/usbA 命中 /vol1/usbA2）
       if (!(task.source === mountPoint || task.source.startsWith(mountPoint + '/'))) continue;
-      log(`auto sync triggered: ${task.name||task.id} (${task.source} → ${task.target})`);
-      // 触发同步 (采用行于 do_sync_api 的默认参数)
+      // 同一次插入事件里一个任务只跑一次（一个盘多分区时不重复触发）
+      const key = task.id || task.name || String(task.source);
+      if (firedTaskIds.has(key)) continue;
+      firedTaskIds.add(key);
+
+      log(`auto sync triggered: ${task.name || task.id} (${task.source} → ${task.target})`);
       try {
         await requestSync({
           source: task.source, target: task.target, bidirectional: !!task.bidirectional,
-          use_delete: !!task.use_delete, task_id: task.id, retry_count: task.retry_count||0,
-          retry_delay: task.retry_delay||5, checksum: !!task.checksum, notify: true,
+          use_delete: !!task.use_delete, task_id: task.id, retry_count: task.retry_count || 0,
+          retry_delay: task.retry_delay || 5, checksum: !!task.checksum, notify: true,
           keep_history: !!task.keep_history, auto: true,
         });
       } catch (e) { log(`auto sync error: ${e.message}`); }
     }
   }
 
-  // ── 待补同步重试 (中断后挂载恢复时自动补) ────────────────────
+  // ── 待补同步重试（中断后设备回来时自动补）────────────────────
+  // 就绪判断用「路径是否真实存在」：USB 拔掉后挂载点与其内容都会消失。
+  // 不再用「排除 /volN」这种猜测——那会让挂在 /volN 下的 U 盘恒判为已就绪。
   async function triggerPendingResync() {
     const list = (loadPending && loadPending()) || [];
     if (!list.length) return;
-    const mounts = readUsbMounts();
-    const mpSet = new Set(mounts.map(m => m.mount_point));
     let triggered = 0;
     for (const item of list) {
-      // 源/目标任一涉及 USB 挂载点, 需该挂载点已恢复才补
-      const needUsb = [item.source, item.target].filter(p => p && !/^\/vol\d+(\/|$)/.test(p));
-      const ready = needUsb.every(p => mpSet.has(p) || [...mpSet].some(mp => p.startsWith(mp + '/')));
+      const need = [item.source, item.target].filter(Boolean);
+      if (!need.length) continue;
+      const ready = need.every((p) => (isAllowedPath ? isAllowedPath(p) : true) && pathReady(p));
       if (!ready) continue;
       if (item.attempts >= 3) { removePending && removePending(item.task_id); continue; }
-      log(`pending resync triggered: ${item.task_id} (挂载已恢复, 尝试 ${item.attempts})`);
+      log(`pending resync triggered: ${item.task_id} (路径已就绪, 尝试 ${item.attempts})`);
       try {
         await requestSync({
           source: item.source, target: item.target, bidirectional: !!item.bidirectional,
@@ -111,23 +86,11 @@ function isUsbRemovable(device, mountPoint) {
     if (triggered) log(`pending resync: ${triggered} task(s) re-triggered`);
   }
 
-  // ── 获取设备 UUID (blkid) ────────────────────────────────────
-  function getUuid(device) {
-    return new Promise((res) => {
-      const timer = setTimeout(() => res(null), 3000);
-      execFile('blkid', ['-s','UUID','-o','value', device], (e, out) => {
-        clearTimeout(timer);
-        res(e ? null : (out.trim() || null));
-      });
-    });
-  }
-
   // ── 计划任务触发 (每分钟检查) ────────────────────────────────
   function triggerScheduledSync() {
     const now = new Date();
-    const hm = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-    const day = now.getDay(); // 0=Sun..6=Sat  (原 bash 用 %u → 1=Mon..7=Sun)
-    const stamp = `${now.getFullYear()}${now.getMonth()+1}${now.getDate()}${hm.replace(':','')}`;
+    const hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const stamp = `${now.getFullYear()}${now.getMonth() + 1}${now.getDate()}${hm.replace(':', '')}`;
     if (lastScheduleStamp === stamp) return;
     lastScheduleStamp = stamp;
 
@@ -138,47 +101,84 @@ function isUsbRemovable(device, mountPoint) {
       const schedule = task.schedule;
       if (schedule !== 'daily' && schedule !== 'weekly') continue;
       if (task.schedule_time !== hm) continue;
-      // weekly: 原 bash 用 %u(1-7), dayJS 用 getDay()(0-6); 换算
-      const taskWeekday = task.schedule_weekday; // 1-7 (周一=1)
-      const bashDay = day === 0 ? 7 : day;       // 转成 1-7
+      const taskWeekday = task.schedule_weekday;               // 1-7 (周一=1)
+      const bashDay = now.getDay() === 0 ? 7 : now.getDay();   // getDay(): 0=周日
       if (schedule === 'weekly' && taskWeekday && Number(taskWeekday) !== bashDay) continue;
       if (!task.source || !task.target) continue;
-      log(`scheduled sync triggered: ${task.name||task.id} at ${hm}`);
+      log(`scheduled sync triggered: ${task.name || task.id} at ${hm}`);
       requestSync({
         source: task.source, target: task.target, bidirectional: !!task.bidirectional,
-        use_delete: !!task.use_delete, task_id: task.id, retry_count: task.retry_count||0,
-        retry_delay: task.retry_delay||5, checksum: !!task.checksum, notify: true,
+        use_delete: !!task.use_delete, task_id: task.id, retry_count: task.retry_count || 0,
+        retry_delay: task.retry_delay || 5, checksum: !!task.checksum, notify: true,
         keep_history: !!task.keep_history, auto: true,
       }).catch((e) => log(`scheduled sync error: ${e.message}`));
     }
   }
 
-  // ── 主循环 ───────────────────────────────────────────────────
-  function loop() {
-    if (stopped) return;
+  // ── 一轮检测 ─────────────────────────────────────────────────
+  async function tick() {
+    let mounts;
     try {
-      const cur = mountsSignature();
-      if (cur !== lastMounts && cur) {
-        if (lastMounts) {
-          // 检测新增挂载
-          const lastSet = new Set((lastMounts||'').split('\n').filter(Boolean));
-          const newMounts = cur.split('\n').filter(m => m && !lastSet.has(m));
-          for (const m of newMounts) {
-            const mp = m.split('|')[1];
-            if (mp) { log(`new USB mount: ${mp}`); triggerAutoSync(mp); }
-          }
-          // 有新的 USB 挂载出现 → 补试被中断的待补同步
-          if (newMounts.length) triggerPendingResync();
+      mounts = await scanUsb();
+    } catch (e) {
+      // 不再静默吞掉：检测层出问题必须能在日志里看到
+      log(`usb scan failed: ${e.message}`);
+      return;
+    }
+    const cur = mountSignature(mounts);
+
+    if (cur !== lastMounts) {
+      const prev = lastMounts;                 // ← 保留旧签名做基线
+      const diff = diffMounts(prev, cur, mounts);
+      lastMounts = cur;                        // ← 空签名也要写回，否则重插同一设备永远不触发
+      for (const r of diff.removed) log(`USB removed: ${r.mount_point}`);
+      for (const a of diff.added) log(`new USB mount: ${a.mount_point}`);
+
+      if (diff.added.length) {
+        // 稳定期后再确认一次：避免挂载瞬间文件系统还没就绪就开跑
+        if (settleMs > 0) await sleep(settleMs);
+        let settled = mounts;
+        try { settled = await scanUsb(); } catch { /* 沿用上一轮结果 */ }
+        const settledSig = mountSignature(settled);
+        // 与「插入前的基线」比较，而不是与刚写回的 cur 比较
+        const addedNow = diffMounts(prev, settledSig, settled).added;
+        if (settledSig !== lastMounts) lastMounts = settledSig;
+
+        const fired = new Set();
+        for (const a of addedNow) {
+          if (a.mount_point) await triggerAutoSync(settled, a.mount_point, fired);
         }
-        lastMounts = cur;
+        if (addedNow.length) await triggerPendingResync();
       }
-      triggerScheduledSync();
-    } catch (e) { try { log(`daemon loop error: ${e.message}`); } catch {} }
-    setTimeout(loop, 5000); // 5s 轮询 (与原 bash 一致)
+    }
+
+    triggerScheduledSync();
+  }
+
+  async function loop() {
+    if (stopped) return;
+    if (running) return;             // 上一轮（含稳定期等待）还没跑完就跳过本轮
+    running = true;
+    try { await tick(); }
+    catch (e) { try { log(`daemon loop error: ${e.message}`); } catch {} }
+    finally { running = false; }
+    if (!stopped) timer = setTimeout(loop, pollMs);
   }
 
   return {
-    start() { lastMounts = mountsSignature(); log(`mount monitor started`); loop(); },
-    stop() { stopped = true; log(`mount monitor stopped`); },
+    async start() {
+      try { lastMounts = mountSignature(await scanUsb()); }
+      catch { lastMounts = ''; }
+      log(`mount monitor started (poll ${pollMs}ms, settle ${settleMs}ms)`);
+      loop();
+    },
+    stop() {
+      stopped = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      log('mount monitor stopped');
+    },
+    // 供测试/诊断使用
+    _signature: () => lastMounts,
+    _tick: tick,
   };
 }

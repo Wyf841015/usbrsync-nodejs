@@ -12,10 +12,11 @@ import { fileURLToPath } from 'node:url';
 
 import * as rsync from './rsync.js';
 import { createDaemon } from './daemon.js';
+import { collectUsbMounts } from './usb.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
-const VERSION = '0.4.2';
+const VERSION = '0.4.3';
 
 // ── 数据目录 ───────────────────────────────────────────────────
 const DATA_BASE = process.env.TRM_PKGVAR || '/tmp/usbrsync-nodejs';
@@ -137,52 +138,23 @@ function removePending(taskId) {
 }
 
 // ── USB 设备扫描 ──────────────────────────────────────────────
-// 异步 execFile, 带 timeout 防 blkid/blockdev 挂死阻塞事件循环
-function execFileAsync(cmd, args, timeoutMs=3000) {
-  return new Promise((res) => {
-    const timer = setTimeout(() => res(''), timeoutMs);
-    try {
-      execFile(cmd, args, { timeout: timeoutMs }, (e, out) => {
-        clearTimeout(timer);
-        res(e ? '' : String(out).trim());
-      });
-    } catch { clearTimeout(timer); res(''); }
-  });
-}
-// ── 真 USB 判定 ────────────────────────────────────────────────
-// 原逻辑只匹配 /^\/dev\/sd/ + /(vfat|ntfs|exfat|fuseblk|ext)/, 会把 NAS 自身的
-// SATA 盘一并识别成 USB (实测 /dev/sdc2 系统盘 ext4 曾被误报)。
-// 改用内核权威属性 /sys/block/<name>/removable: 1=可移动(USB/读卡器), 0=SATA/NVMe 固定盘。
-// 另排除挂载在 /volN 下的 fnOS 内部卷作为双保险。
-function isUsbRemovable(device, mountPoint) {
-  if (/^\/vol\d+(\/|$)/.test(mountPoint)) return false;
-  const name = String(device).replace(/^\/dev\//, '');
-  try {
-    if (readFileSync('/sys/block/' + name + '/removable', 'utf8').trim() !== '1') return false;
-  } catch { return false; }
-  return true;
-}
+// 检测逻辑统一在 ui/usb.js（daemon 与 API 共用一份，避免两处实现各自漂移）。
+// 这里只加一层短 TTL 缓存：/api/status 与 /api/devices 常被同一次刷新连续调用，
+// 缓存可以避免同一秒内反复 fork lsblk。
+let _usbCache = { at: 0, list: [] };
+const USB_CACHE_MS = Number(process.env.USBR_SYNC_USB_CACHE_MS || 1500);
 
 async function scanUsbDevices() {
-  const devs = [];
+  const now = Date.now();
+  if (now - _usbCache.at < USB_CACHE_MS) return _usbCache.list;
   try {
-    for (const line of readFileSync('/proc/mounts','utf8').split('\n')) {
-      const parts = line.split(' ');
-      if (parts.length < 3) continue;
-      const device=parts[0], mp=parts[1], fs=parts[2];
-      if (!/^\/dev\/sd/.test(device)) continue;
-      if (!/(vfat|ntfs|exfat|fuseblk|ext)/.test(fs)) continue;
-      if (!isUsbRemovable(device, mp)) continue;   // 排除 SATA 固定盘(removable=0)
-      let uuid='', label='', size='0';
-      // 异步 + 超时, 避免挂起设备冻结事件循环
-      uuid  = await execFileAsync('blkid',['-s','UUID','-o','value',device]);
-      label = await execFileAsync('blkid',['-s','LABEL','-o','value',device]);
-      size  = await execFileAsync('blockdev',['--getsize64',device]) || '0';
-      devs.push({ device, mount_point:mp, fs_type:fs, name:label||basename(mp), uuid, label,
-                  size: size || '0' });
-    }
-  } catch {}
-  return devs;
+    const list = await collectUsbMounts();
+    _usbCache = { at: now, list };
+    return list;
+  } catch (e) {
+    log(`usb scan failed: ${e.message}`);
+    return _usbCache.list || [];
+  }
 }
 
 // ── rsync 核心绑定 ─────────────────────────────────────────────
