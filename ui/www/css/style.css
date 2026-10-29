@@ -11,6 +11,9 @@ html,body{margin:0;min-height:100%;font-family:Inter,"Noto Sans SC",system-ui,sa
 /* ── 深色主题 (默认) ── */
 :root{color-scheme:dark;--bg:#07111f;--panel:#0d1b2c;--panel2:#122238;--line:#203754;--text:#e8f0fa;--muted:#86a0be;--blue:#3370ff;--cyan:#00b8d9;--green:#00c2a8;--gold:#ffc000;--red:#ff5c69;
 --r-sm:8px;--r-md:12px;--r-lg:16px;--r-full:9999px;
+/* 按钮统一规格：全站按钮只用这一套尺寸/圆角/字重 */
+--r-btn:9999px;--btn-h:34px;--btn-h-sm:30px;--btn-px:14px;--btn-px-sm:11px;
+--btn-fs:12px;--btn-fs-sm:11.5px;--btn-w:600;--panel-hover:#1a3050;--btn-ring:rgba(51,112,255,.45);
 --shadow:0 1px 3px rgba(0,0,0,.2);--shadow-md:0 6px 20px rgba(0,0,0,.3);
 --tr:background-color .2s ease,color .2s ease,border-color .2s ease,box-shadow .2s ease,transform .2s ease}
 body{background:var(--bg);color:var(--text);line-height:1.5}
@@ -49,17 +52,68 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
 .ctitle{font-size:14px;font-weight:700}
 .ctitle::before{content:"";display:inline-block;width:4px;height:14px;background:linear-gradient(180deg,var(--blue),var(--cyan));border-radius:var(--r-sm);margin-right:8px;vertical-align:-2px}
 
-/* ── 按钮 ── */
-.btn{border:1px solid transparent;padding:8px 13px;background:none;color:var(--text);cursor:pointer;font:inherit;font-size:12px;border-radius:var(--r-md);transition:var(--tr);font-weight:500}
-.btn:hover{filter:brightness(1.12);transform:translateY(-1px)}
-.btn:active{transform:translateY(0) scale(.98)}
-.btn-sm{padding:6px 10px}
-.bp{background:linear-gradient(135deg,var(--blue),#5b8bff);color:white;box-shadow:0 2px 8px rgba(51,112,255,.3)}
+/* ══ 统一按钮系统 ══════════════════════════════════════════════
+   全站只有一套几何: 胶囊圆角 / 固定高度 / 600 字重 / 同一套 hover 反馈。
+   差异化只体现在「颜色角色」上:
+     .bp 主操作   蓝渐变
+     .bs 次操作   面板底 + 描边
+     .bd 危险     红色调
+     .sponsor-btn / .contact-btn / .theme-btn  品牌色胶囊
+     .btn-icon    关闭类图标钮 (32×32)
+   桌面/移动端高度一致，移动端只收紧左右内边距。
+   旧版 header 四个按钮各自一套尺寸(12px 圆角 vs 9999px、500 vs 600 字重、
+   33 vs 34 vs 38px 高)，已全部收敛到这里的令牌。 */
+.btn,
+.sponsor-btn,
+.contact-btn,
+.theme-btn,
+.contact-copy-btn,
+.btn-icon{
+  display:inline-flex;align-items:center;justify-content:center;gap:5px;
+  height:var(--btn-h);min-height:var(--btn-h);
+  padding:0 var(--btn-px);
+  font:inherit;font-size:var(--btn-fs);font-weight:var(--btn-w);line-height:1;
+  border:1px solid transparent;border-radius:var(--r-btn);
+  background:none;color:var(--text);cursor:pointer;white-space:nowrap;
+  box-sizing:border-box;flex-shrink:0;
+  transition:transform .18s ease,box-shadow .22s ease,background-color .2s ease,border-color .2s ease,color .2s ease;
+}
+.btn:hover,
+.sponsor-btn:hover,
+.contact-btn:hover,
+.theme-btn:hover,
+.contact-copy-btn:hover,
+.btn-icon:hover{transform:translateY(-1px)}
+.btn:active,
+.sponsor-btn:active,
+.contact-btn:active,
+.theme-btn:active,
+.contact-copy-btn:active,
+.btn-icon:active{transform:translateY(0) scale(.97);transition-duration:.06s}
+.btn:focus-visible,
+.sponsor-btn:focus-visible,
+.contact-btn:focus-visible,
+.theme-btn:focus-visible,
+.contact-copy-btn:focus-visible,
+.btn-icon:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+
+/* 紧凑尺寸：卡片头、任务行、弹窗按钮组统一用它 */
+.btn-sm{height:var(--btn-h-sm);min-height:var(--btn-h-sm);padding:0 var(--btn-px-sm);font-size:var(--btn-fs-sm)}
+
+/* 颜色角色 */
+.bp{background:linear-gradient(135deg,var(--blue),#5b8bff);color:#fff;border-color:transparent;box-shadow:0 2px 8px rgba(51,112,255,.28)}
 .bp:hover{box-shadow:0 4px 14px rgba(51,112,255,.45)}
-.bs{border-color:var(--line);background:var(--panel2)}
-.bs:hover{background:#1a3050}
-.bd{border-color:#69333d;color:#ff8d96;background:#2b1821}
-.bd:hover{background:#3a1d27}
+.bs{border-color:var(--line);background:var(--panel2);color:var(--text)}
+.bs:hover{background:var(--panel-hover);border-color:var(--btn-ring)}
+/* 危险操作：描边红（透明底），与「实底+白字」的彩色按钮靠形态区分，不再用浅底深字 */
+.bd{border-color:#8d3944;background:transparent;color:#ff8d96}
+.bd:hover{background:rgba(255,92,105,.12);border-color:#b64a55}
+
+/* 关闭类图标钮：× / ✕ 三种写法收敛成一种 */
+.btn-icon{width:var(--btn-h);padding:0;font-size:16px;color:var(--muted)}
+.btn-icon:hover{color:var(--text);background:var(--panel-hover)}
+/* 弹窗头关闭钮与弹窗内其他按钮同高，避免同一行里出现第三种高度 */
+.modal .mh .btn-icon{font-size:15px}
 
 /* ── 设备/磁盘条目 ── */
 .dc,.drive{padding:12px 13px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-sm);margin-bottom:8px;transition:var(--tr)}
@@ -106,8 +160,9 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
 .mc.wide{width:min(900px,100%)}
 .mh{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
 .mt{font-weight:700;font-size:15px}
-.close{color:var(--muted);font-size:24px;background:none;border:0;cursor:pointer;line-height:1;padding:4px 8px;border-radius:var(--r-sm);transition:var(--tr)}
-.close:hover{color:var(--text);background:var(--panel2)}
+/* 兼容写法：模板里若还有 .close，也走图标钮规格 */
+.close,.sponsor-modal-close,.contact-modal-close{display:inline-flex;align-items:center;justify-content:center;width:var(--btn-h);height:var(--btn-h);padding:0;font-size:15px;line-height:1;color:var(--muted);background:none;border:0;border-radius:var(--r-btn);cursor:pointer;transition:background-color .2s,color .2s,transform .18s ease}
+.close:hover,.sponsor-modal-close:hover,.contact-modal-close:hover{color:var(--text);background:var(--panel-hover);transform:translateY(-1px)}
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:13px}
 .form-grid label{font-size:11px;color:var(--muted)}
 .span2{grid-column:1/-1}
@@ -135,22 +190,29 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
 
 /* ── 移动端 ── */
 @media(max-width:760px){.hc{align-items:flex-start;flex-direction:column}.header-actions{width:100%;overflow:visible;flex-wrap:wrap;gap:6px;padding-bottom:2px}.header-actions .btn,.header-actions .sponsor-btn,.header-actions .theme-btn,.header-actions .contact-btn,.header-actions .hs{flex-shrink:0;white-space:nowrap}.header-actions .hs{flex-basis:100%;max-width:100%;margin-right:0}.kpis{grid-template-columns:1fr 1fr}.g{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}.span2{grid-column:auto}.history-row{grid-template-columns:50px 1fr}.history-row code{display:none}.ct{padding:12px}.card{padding:13px}}
-@media(max-width:430px){.kpis{gap:7px}.kpis article{padding:12px}.kpis b{font-size:17px}.task-actions .btn{flex:1}.modal{padding:0}.mc,.mc.wide{height:100vh;max-height:none;border:0}.btn-group{position:sticky;bottom:0;background:var(--panel);padding-top:10px}.header-actions .btn{padding:6px 9px}.header-actions .hs{align-self:flex-start}.hc{padding:10px 14px}.hc h1{font-size:16px}}
+@media(max-width:430px){.kpis{gap:7px}.kpis article{padding:12px}.kpis b{font-size:17px}.modal{padding:0}.mc,.mc.wide{height:100vh;max-height:none;border:0}.btn-group{position:sticky;bottom:0;background:var(--panel);padding-top:10px}.header-actions .hs{align-self:flex-start}.hc{padding:10px 14px}.hc h1{font-size:16px}}
 
 /* ══ 以下为赞助 + 主题 (追加, 保持既有 class) ══ */
 
 /* ── 浅色主题 (移除 html.dark 进入浅色) ── */
-:root:not(.dark){color-scheme:light;--bg:#f4f7fb;--panel:#ffffff;--panel2:#eef2f7;--line:#d8e0ea;--text:#1b2737;--muted:#5b6d82;--blue:#2f5ee0;--cyan:#00889a;--green:#008f7c;--gold:#b97900;--red:#d23b45}
+:root:not(.dark){color-scheme:light;--bg:#f4f7fb;--panel:#ffffff;--panel2:#eef2f7;--line:#d8e0ea;--text:#1b2737;--muted:#5b6d82;--blue:#2f5ee0;--cyan:#00889a;--green:#008f7c;--gold:#b97900;--red:#d23b45;
+--panel-hover:#e4ebf4;--btn-ring:rgba(47,94,224,.35)}
 :root:not(.dark) body{background:var(--bg);color:var(--text)}
 :root:not(.dark) .h{background:rgba(244,247,251,.92);border-bottom-color:var(--line)}
 :root:not(.dark) .hc h1{color:#111a27}
 :root:not(.dark) .hc h1 small{color:var(--cyan);background:rgba(0,136,154,.1);border-color:rgba(0,136,154,.2)}
-:root:not(.dark) .btn{color:#1b2737}
-:root:not(.dark) .btn:hover{filter:brightness(.98)}
+:root:not(.dark) .btn,
+:root:not(.dark) .btn-icon,
+:root:not(.dark) .close{color:#1b2737}
 :root:not(.dark) .btn.bs{border-color:#c7d2e0;background:#eef2f7;color:#33455c}
-:root:not(.dark) .btn.bs:hover{background:#e4ebf4}
-:root:not(.dark) .btn.bp{background:var(--blue);color:#fff}
-:root:not(.dark) .btn.bd{border-color:#d9a0a6;color:#b32630;background:#fce8ea}
+:root:not(.dark) .btn.bs:hover{background:#e4ebf4;border-color:#9fbedd}
+:root:not(.dark) .btn.bp{background:linear-gradient(135deg,#2f5ee0,#5b8bff);color:#fff}
+:root:not(.dark) .btn.bd{border-color:#d9a0a6;color:#b32630;background:transparent}
+:root:not(.dark) .btn.bd:hover{background:#fce8ea;border-color:#c9868e}
+:root:not(.dark) .btn-icon:hover,
+:root:not(.dark) .close:hover,
+:root:not(.dark) .sponsor-modal-close:hover,
+:root:not(.dark) .contact-modal-close:hover{color:#1b2737;background:#e4ebf4}
 :root:not(.dark) .kpis article{background:#fff;border-color:var(--line);box-shadow:var(--shadow)}
 :root:not(.dark) .kpis b{background:linear-gradient(90deg,#1b2737,#3366cc);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
 :root:not(.dark) .card{background:#fff}
@@ -175,15 +237,13 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
 :root:not(.dark) .history-row:nth-child(even){background:rgba(238,242,247,.5)}
 
 /* ── 赞助按钮 ── */
-.sponsor-btn{display:inline-flex;align-items:center;gap:5px;padding:8px 14px;border-radius:9999px;cursor:pointer;font-size:12px;font-weight:600;color:#d4537a;background:linear-gradient(135deg,#fce7f3,#fbcfe8);border:1px solid #f5b8d0;box-shadow:0 2px 8px rgba(219,39,119,.15);transition:background-color .25s,transform .25s,box-shadow .25s;white-space:nowrap}
-.sponsor-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(219,39,119,.25)}
-:root.dark .sponsor-btn{color:#f9a8d4;background:linear-gradient(135deg,#831843,#9d174d);border-color:#be185d}
-:root.dark .sponsor-btn:hover{box-shadow:0 4px 14px rgba(190,24,93,.35)}
+/* 品牌入口统一处理：饱和渐变 + 白字 + 同一套阴影，深浅主题都成立 */
+.sponsor-btn{color:#fff;background:linear-gradient(135deg,#db2777,#f472b6);border-color:transparent;box-shadow:0 2px 8px rgba(219,39,119,.28)}
+.sponsor-btn:hover{box-shadow:0 4px 14px rgba(219,39,119,.45)}
 
 /* ── 主题按钮 ── */
-.theme-btn{width:38px;height:38px;border-radius:9999px;cursor:pointer;font-size:16px;background:linear-gradient(135deg,#4f46e5,#7c3aed);border:1px solid transparent;color:#fff;display:inline-flex;align-items:center;justify-content:center;transition:transform .25s,box-shadow .25s;box-shadow:0 2px 8px rgba(79,70,229,.25)}
-.theme-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(79,70,229,.4)}
-:root.dark .theme-btn{background:linear-gradient(135deg,#4f46e5,#a855f7)}
+.theme-btn{background:linear-gradient(135deg,#4f46e5,#7c3aed);border-color:transparent;color:#fff;box-shadow:0 2px 8px rgba(79,70,229,.25)}
+.theme-btn:hover{box-shadow:0 4px 14px rgba(79,70,229,.45)}
 
 /* ── 赞助弹窗 ── */
 .sponsor-modal-overlay{display:none;position:fixed;inset:0;background:rgba(1,7,14,.82);z-index:150;align-items:center;justify-content:center;padding:16px}
@@ -192,8 +252,7 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
 @keyframes spon-in{from{opacity:0;transform:translateY(16px) scale(.96)}to{opacity:1;transform:none}}
 .sponsor-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .sponsor-header h3{margin:0;font-size:17px}
-.sponsor-modal-close{border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:2px 6px;line-height:1}
-.sponsor-modal-close:hover{color:var(--text)}
+/* .sponsor-modal-close 规格已并入 .btn-icon 组 */
 .sponsor-sub{margin:0 0 6px;color:var(--muted);font-size:13px}
 .sponsor-qr-row{display:flex;gap:24px;justify-content:center;margin-top:18px;flex-wrap:wrap}
 .sponsor-qr-item{text-align:center}
@@ -206,77 +265,48 @@ body{background:var(--bg);color:var(--text);line-height:1.5}
 :root:not(.dark) .sponsor-modal-content{background:#fff;border-color:#c7d2e0}
 
 /* ── 联系作者按钮 + 弹窗 ── */
-.contact-btn{display:inline-flex;align-items:center;gap:5px;padding:8px 14px;border-radius:9999px;cursor:pointer;font-size:12px;font-weight:600;color:#0b3d52;background:linear-gradient(135deg,#a5f3fc,#67e8f9);border:1px solid #22d3ee;box-shadow:0 2px 8px rgba(34,211,238,.22);transition:transform .25s,box-shadow .25s;white-space:nowrap}
-.contact-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(34,211,238,.38)}
-:root.dark .contact-btn{color:#083344;background:linear-gradient(135deg,#22d3ee,#06b6d4);border-color:#0e7490}
-:root.dark .contact-btn:hover{box-shadow:0 4px 14px rgba(14,116,144,.45)}
+.contact-btn{color:#fff;background:linear-gradient(135deg,#0891b2,#22d3ee);border-color:transparent;box-shadow:0 2px 8px rgba(34,211,238,.28)}
+.contact-btn:hover{box-shadow:0 4px 14px rgba(34,211,238,.45)}
 .contact-modal-overlay{display:none;position:fixed;inset:0;background:rgba(1,7,14,.82);z-index:150;align-items:center;justify-content:center;padding:16px}
 .contact-modal-overlay.show{display:flex}
 .contact-modal-content{background:var(--panel);border:1px solid #315172;border-radius:16px;padding:26px;max-width:400px;width:min(400px,100%);text-align:center;box-shadow:0 20px 48px rgba(0,0,0,.5);animation:spon-in .3s cubic-bezier(.34,1.56,.64,1)}
 .contact-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .contact-header h3{margin:0;font-size:17px}
-.contact-modal-close{border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:2px 6px;line-height:1}
-.contact-modal-close:hover{color:var(--text)}
+/* .contact-modal-close 规格已并入 .btn-icon 组 */
 .contact-sub{margin:0 0 18px;font-size:13px;color:var(--muted);line-height:1.6}
 .qq-box{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:18px 12px;margin-bottom:14px}
 .qq-num{font-size:30px;font-weight:800;letter-spacing:2px;color:var(--blue);cursor:pointer;user-select:all;padding:6px 10px;transition:color .25s}
 .qq-num:hover{color:var(--cyan)}
 .qq-hint{margin:6px 0 0;font-size:11px;color:var(--muted)}
-.contact-copy-btn{width:100%;padding:10px;border-radius:var(--r-md);cursor:pointer;font-size:13px;font-weight:600;color:#0b3d52;background:linear-gradient(135deg,#a5f3fc,#67e8f9);border:1px solid #22d3ee;transition:transform .25s,box-shadow .25s}
+.contact-copy-btn{width:100%;color:#fff;background:linear-gradient(135deg,var(--blue),#5b8bff);border-color:transparent;box-shadow:0 2px 8px rgba(51,112,255,.28)}
 .contact-copy-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(34,211,238,.38)}
-:root.dark .contact-copy-btn{color:#083344;background:linear-gradient(135deg,#22d3ee,#06b6d4);border-color:#0e7490}
+:root.dark .contact-copy-btn{color:#fff;background:linear-gradient(135deg,var(--blue),#5b8bff);border-color:transparent}
 
-/* ── 顶部按钮统一风格 (2026-09-29) ──
-   原来 4 套尺寸: .btn 12px圆角/33px高/500字重, sponsor+contact 9999px圆角/33px高/600字重,
-   .theme-btn 38×38圆形/16px图标 → 视觉不齐。统一为 34px 高 / 9999px 圆角 / 12px 字 / 600 字重。 */
+/* ── 顶部操作区：尺寸全部由上面的按钮系统负责，这里只管间距与移动端收紧 ── */
+.header-actions{gap:8px}
+/* 桌面端给同一最小宽度，六个按钮视觉宽度一致（文字长短不同时不会一大一小） */
 .header-actions .btn,
 .header-actions .sponsor-btn,
-.header-actions .contact-btn{
-  height:34px;
-  min-height:34px;
-  padding:0 14px;
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  gap:5px;
-  font-size:12px;
-  font-weight:600;
-  line-height:1;
-  border-radius:9999px;
-  white-space:nowrap;
-  flex-shrink:0;
-  box-sizing:border-box;
-}
-/* 主题按钮: 34×34 圆形图标钮 (与其余 34px 高按钮中心线对齐) */
-/* 主题按钮: 2026-09-29 起带文字(🌙 主题 / ☀️ 浅色), 与其他文字按钮同一规格 */
-.header-actions .theme-btn{
-  width:auto;
-  height:34px;
-  min-height:34px;
-  padding:0 14px;
-  font-size:12px;
-  font-weight:600;
-  line-height:1;
-  border-radius:9999px;
-  white-space:nowrap;
-  flex-shrink:0;
-  box-sizing:border-box;
-}
-/* 主题按钮: 已取消倾斜(旋转)效果, 仅保留上浮与按下压缩的常规反馈 */
-.header-actions .theme-btn{transform:none;transition:transform .25s,box-shadow .25s}
-.header-actions .theme-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(79,70,229,.4)}
-.header-actions .theme-btn:active{transform:scale(.92);box-shadow:0 1px 4px rgba(79,70,229,.3);transition-duration:.08s}
+.header-actions .contact-btn,
+.header-actions .theme-btn{min-width:78px}
+/* 旧版这里堆了 4 段覆盖(34px 高/9999px 圆角/600 字重 × 各按钮)，与基础 .btn 重复且互相打架，
+   现已删除；按钮规格只在「统一按钮系统」一处定义，改一处全站生效。 */
 
-/* 次级按钮(日志/导出)浅色底, 主按钮(导入)保留蓝色渐变 */
-.header-actions .btn.bs{border-color:var(--line);background:var(--panel2);color:var(--text)}
-.header-actions .btn.bp{background:linear-gradient(135deg,var(--blue),#5b8bff);color:#fff;border-color:transparent}
-.header-actions .btn.bs:hover,
-.header-actions .btn.bp:hover{transform:translateY(-1px)}
-/* 移动端: 保持同一高度, 只收紧间距, 避免换行后尺寸再次不一致 */
+/* 移动端：高度保持一致，只收紧左右内边距，避免换行后尺寸再次不一致 */
 @media(max-width:760px){
-  .header-actions{gap:6px}
+  /* 手机端按钮改等宽网格：6 个按钮排成 2 行 3 列，宽度一致、不再有一个按钮单独换行 */
+  .header-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;width:100%}
+  .header-actions .hs{grid-column:1/-1;margin-right:0}
   .header-actions .btn,
   .header-actions .sponsor-btn,
   .header-actions .contact-btn,
-  .header-actions .theme-btn{padding:0 12px;font-size:11.5px}
+  .header-actions .theme-btn{width:100%;padding:0 8px;font-size:11.5px}
+}
+@media(max-width:430px){
+  .header-actions .btn,
+  .header-actions .sponsor-btn,
+  .header-actions .contact-btn,
+  .header-actions .theme-btn{padding:0 6px;font-size:11px}
+  /* 任务行按钮铺满一行：与卡片按钮同高度，不再单独缩小字号 */
+  .task-actions .btn{flex:1;min-width:0}
 }
