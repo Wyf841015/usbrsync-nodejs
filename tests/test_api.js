@@ -121,7 +121,54 @@ test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
     assert.strictEqual(r.status, 404);
   });
 
-  // ── 源目录浏览的范围锁（源目录只允许在 USB 设备内）──────────
+  // ── P0-1 删除护栏（真实 rsync 预检）────────────────────────
+  await t.test('sync: --delete 在源目录为空时被阻止', async () => {
+    const fs = await import('node:fs');
+    const base = '/tmp/usbrsync-guard';
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.mkdirSync(`${base}/src`, { recursive: true });
+    fs.mkdirSync(`${base}/tgt`, { recursive: true });
+    fs.writeFileSync(`${base}/tgt/keep1.txt`, 'x');
+    fs.writeFileSync(`${base}/tgt/keep2.txt`, 'y');
+    t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+
+    const r = await api('/api/sync', 'POST', {
+      source: `${base}/src`, target: `${base}/tgt`, use_delete: true,
+    });
+    assert.equal(r.body.success, false, '应被拒绝');
+    assert.match(r.body.error || '', /源目录里没有任何条目/);
+    // 目标文件必须原样还在（护栏生效的硬证据）
+    assert.ok(fs.existsSync(`${base}/tgt/keep1.txt`));
+    assert.ok(fs.existsSync(`${base}/tgt/keep2.txt`));
+  });
+
+  await t.test('sync: --delete 正常清理放行并完成', async () => {
+    const fs = await import('node:fs');
+    const base = '/tmp/usbrsync-guard2';
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.mkdirSync(`${base}/src`, { recursive: true });
+    fs.mkdirSync(`${base}/tgt`, { recursive: true });
+    fs.writeFileSync(`${base}/src/a.txt`, 'aaa');
+    fs.writeFileSync(`${base}/tgt/stale.txt`, 'old');
+    t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+
+    const r = await api('/api/sync', 'POST', {
+      source: `${base}/src`, target: `${base}/tgt`, use_delete: true, notify: false,
+    });
+    assert.equal(r.body.success, true, `应被放行: ${JSON.stringify(r.body)}`);
+
+    // 等同步跑完（最多 15s）
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      const st = await api('/api/status');
+      if (st.body.sync?.status !== 'syncing') break;
+      await new Promise((res) => setTimeout(res, 300));
+    }
+    assert.ok(fs.existsSync(`${base}/tgt/a.txt`), '新文件应已同步');
+    assert.ok(!fs.existsSync(`${base}/tgt/stale.txt`), '多余文件应被删除');
+  });
+
+
   await t.test('browse: root 参数锁定浏览范围', async () => {
     const fs = await import('node:fs');
     const rootA = '/tmp/usbrsync-browse-a';

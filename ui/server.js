@@ -178,36 +178,71 @@ function notifyDone(title, content, level) {
 }
 
 // ── 同步触发 (daemon 与 API 共用) ──────────────────────────────
-function requestSync(p) {
-  return new Promise((res, rej) => {
-    if (running) { res({ status:'busy', message:'已有同步正在运行' }); return; }
-    if (!p.source || !p.target || !isAllowedPath(p.source) || !isAllowedPath(p.target)) {
-      res({ status:'error', message:'路径不允许或缺失' }); return;
-    }
-    // 旋转日志
-    rotateLog();
-    // 后台启动
-    const ctl = rsync.startSync({
-      source:p.source, target:p.target, bidirectional:p.bidirectional,
-      del:p.use_delete, taskId:p.task_id, retry:p.retry_count,
-      delay:p.retry_delay, checksum:p.checksum, keep:p.keep_history, notify:p.notify,
-    }, { setStatus:setSyncStatus, synclog:SYNCLOG, appendHistory, notify:notifyDone });
-    running = ctl;
-    // 完成后清 running (startSync 返回 donePromise, 在完成时 resolve)
-    ctl.donePromise.then((res) => {
-      if (running === ctl) running = null;
-      if (!res) return;
-      if (res.success) {
-        removePending(p.task_id);
-      } else if (res.exit_code !== -999 && p.task_id && p.task_id.indexOf('(restore)') === -1) {
-        // 失败且非用户停止(-999) → 记入待补 (挂载恢复后 daemon 自动补, 最多3次)
-        const pm = loadPending().find(x=>x.task_id===p.task_id);
-        if (!pm || pm.attempts < 3) addPending(p);
-      }
-    })
-       .catch(() => { if (running === ctl) running = null; });
-    res({ status:'running', message:'同步已开始' });
+// 所有入口(手动/插入自动/计划/待补)都必须经过这里，预检也放在这里，
+// 保证「带 --delete 的危险同步」在哪条路径上都被拦一次。
+async function requestSync(p) {
+  if (running) return { status:'busy', message:'已有同步正在运行' };
+  if (!p.source || !p.target || !isAllowedPath(p.source) || !isAllowedPath(p.target)) {
+    return { status:'error', message:'路径不允许或缺失' };
+  }
+
+  // ── 预检（一次 dry-run，同时拿到「要写多少字节」与「会删多少项」）──
+  // 取代原先每次同步都跑的全盘 `du -sb`；也是 --delete 的护栏。
+  setSyncStatus('syncing', 0, '', '正在预检源目录…', '', 0);
+  const pre = await rsync.preflight({
+    source: p.source, target: p.target,
+    del: !!p.use_delete, checksum: !!p.checksum, taskId: p.task_id,
   });
+  if (pre.ok) {
+    const st = pre.stats || {};
+    // 用 reg（正则文件）计数判空：`Number of files` 含目录自身，空目录也是 1
+    const guard = rsync.deleteGuard({ sourceFiles: st.filesReg, deletes: st.deletedReg || st.deleted });
+    if (!guard.ok) {
+      setSyncStatus('idle', 0, '', '预检已阻止本次同步', '', 0);
+      log(`preflight blocked delete: ${guard.reason} (${p.source} → ${p.target})`);
+      return { status:'error', message: guard.reason };
+    }
+    if (p.check_space !== false) {
+      const free = await rsync.freeBytes(p.target);
+      const need = st.transferredBytes || 0;
+      if (free !== null && need > free) {
+        setSyncStatus('idle', 0, '', '目标空间不足', '', 0);
+        return { status:'error', message:`目标空间不足：需要 ${need} B，可用 ${free} B` };
+      }
+    }
+  } else if (p.use_delete) {
+    // 带删除时预检失败必须 fail-closed：开不了口子，宁可不跑
+    setSyncStatus('idle', 0, '', '预检失败，已阻止同步', '', 0);
+    log(`preflight failed, delete blocked: ${pre.reason} (${p.source} → ${p.target})`);
+    return { status:'error', message:`预检失败，已阻止带删除的同步：${pre.reason}` };
+  } else {
+    log(`preflight skipped: ${pre.reason}（继续执行，空间/删除由 rsync 自己报错）`);
+  }
+
+  // 预检期间可能已有别的同步进来
+  if (running) return { status:'busy', message:'已有同步正在运行' };
+  rotateLog();
+
+  const ctl = rsync.startSync({
+    source:p.source, target:p.target, bidirectional:p.bidirectional,
+    del:p.use_delete, taskId:p.task_id, retry:p.retry_count,
+    delay:p.retry_delay, checksum:p.checksum, keep:p.keep_history, notify:p.notify,
+  }, { setStatus:setSyncStatus, synclog:SYNCLOG, appendHistory, notify:notifyDone });
+  running = ctl;
+  // 完成后清 running (startSync 返回 donePromise, 在完成时 resolve)
+  ctl.donePromise.then((res) => {
+    if (running === ctl) running = null;
+    if (!res) return;
+    if (res.success) {
+      removePending(p.task_id);
+    } else if (res.exit_code !== -999 && p.task_id && p.task_id.indexOf('(restore)') === -1) {
+      // 失败且非用户停止(-999) → 记入待补 (挂载恢复后 daemon 自动补, 最多3次)
+      const pm = loadPending().find(x=>x.task_id===p.task_id);
+      if (!pm || pm.attempts < 3) addPending(p);
+    }
+  })
+     .catch(() => { if (running === ctl) running = null; });
+  return { status:'running', message:'同步已开始' };
 }
 function rotateLog() {
   try {
@@ -310,14 +345,10 @@ async function handleApi(pathname, req, res) {
         if (syncRunning()) return send(res,200,{ success:false, error:'已有同步正在运行，请先停止或等待完成' });
         if (!p.source || !p.target) return send(res,200,{success:false,error:'source/target required'});
         if (!isAllowedPath(p.source) || !isAllowedPath(p.target)) return send(res,200,{success:false,error:'path not allowed'});
-        if (p.check_space !== false) {
-          const cs = await rsync.checkSpace(p.source, p.target);
-          if (!cs.ok) return send(res,200,{success:false,error:cs.reason||'目标空间不足'});
-        }
-        // 互斥最终防线 (checkSpace await 期间可能已有其他同步进入)
-        if (syncRunning()) return send(res,200,{ success:false, error:'已有同步正在运行，请先停止或等待完成' });
+        // 空间/删除护栏已统一放到 requestSync 的预检里（自动/计划/待补同一条路径）
         const r = await requestSync(p);
-        return send(res,200,{ success:true, result:r });
+        if (r && r.status === 'running') return send(res,200,{ success:true, result:r });
+        return send(res,200,{ success:false, error:(r && r.message) || '同步未能开始', result:r });
       }
       case '/preview': {
         let p; try { p=JSON.parse(body||'{}'); } catch { p={}; }

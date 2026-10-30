@@ -4,7 +4,8 @@
 // 构建 rsync 命令 + 后台执行 + 状态/进度追踪 + 重试/双向/停止 + 历史 + 通知
 // ═══════════════════════════════════════════════════════════════
 import { spawn, execFile } from 'node:child_process';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 // 外部注入的依赖 (避免循环依赖)
 let _hook = null;  // { setStatus, log, appendHistory, notify }
@@ -23,30 +24,57 @@ function ts() {
 }
 function epoch() { return Math.floor(Date.now()/1000); }
 
+// ── /proc/mounts 的八进制转义（空格=\040 等）必须解码，否则带空格的
+//    挂载点永远匹配不上 → 检测不到 exFAT → 漏 --modify-window
+export function decodeMountEscapes(str) {
+  return String(str).replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
+}
+
+// ── 从 /proc/mounts 文本判定目标 fs（纯函数，便于测试）─────────
+export function detectFsFromMounts(mountsText, target) {
+  let bestDepth = -1, bestFs = '';
+  for (const line of String(mountsText || '').split('\n')) {
+    const parts = line.split(' ');
+    if (parts.length < 3) continue;
+    const mp = decodeMountEscapes(parts[1]);
+    const fs = parts[2];
+    if (target === mp || String(target).startsWith(mp + '/')) {
+      const depth = mp.split('/').length;
+      if (depth > bestDepth) { bestDepth = depth; bestFs = String(fs).toLowerCase(); }
+    }
+  }
+  return bestFs;
+}
+
 // ── 检测目标文件系统 (exFAT/NTFS → --modify-window) ─────────────
 function detectTargetFs(target) {
-  try {
-    const mounts = readFileSync('/proc/mounts','utf8').split('\n');
-    let bestDepth = -1, bestFs = '';
-    for (const line of mounts) {
-      const parts = line.split(' ');
-      if (parts.length < 3) continue;
-      const mp = parts[1], fs = parts[2];
-      if (target === mp || target.startsWith(mp + '/')) {
-        const depth = mp.split('/').length;
-        if (depth > bestDepth) { bestDepth = depth; bestFs = fs.toLowerCase(); }
-      }
-    }
-    return bestFs;
-  } catch { return ''; }
+  try { return detectFsFromMounts(readFileSync('/proc/mounts','utf8'), target); }
+  catch { return ''; }
+}
+
+// ── 排除规则清洗：限条数/限长度/去重（配置来自用户，不能无限往 argv 里塞）──
+export const MAX_EXCLUSIONS = 200;
+export const MAX_EXCLUSION_LEN = 512;
+export function sanitizeExclusions(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const raw of list) {
+    if (typeof raw !== 'string') continue;
+    const v = raw.trim();
+    if (!v || v.length > MAX_EXCLUSION_LEN) continue;
+    if (out.includes(v)) continue;
+    out.push(v);
+    if (out.length >= MAX_EXCLUSIONS) break;
+  }
+  return out;
 }
 
 // ── rsync 命令构建 ───────────────────────────────────────────────
 export function buildRsyncCmd({ source, target, del=false, taskId=null, checksum=false, dry=false, keep=false }) {
   const cmd = ['rsync','-av','--info=progress2','--stats'];
   const { excluder } = _hook || {};
-  const exclusions = excluder ? excluder(taskId) : [];
-  for (const e of exclusions) if (e && typeof e === 'string') cmd.push('--exclude', e);
+  const exclusions = sanitizeExclusions(excluder ? excluder(taskId) : []);
+  for (const e of exclusions) cmd.push('--exclude', e);
   if (del) cmd.push('--delete');
   if (checksum) cmd.push('--checksum');
   if (dry) cmd.push('--dry-run','--itemize-changes');
@@ -79,11 +107,98 @@ export function diffDirs(source, target) {
   return new Promise((res) => {
     let sc=0, tc=0, sf=0, tf=0, pending=4;
     const fin = () => { if (--pending === 0) res({ source_bytes:sc, target_bytes:tc, source_files:sf, target_files:tf, same_size: sc===tc }); };
-    execFile('du',['-sb',source],(e,o)=>{ if(!e) sc=parseInt(o.toString().split('\t')[0],10)||0; fin(); });
-    execFile('du',['-sb',target],(e,o)=>{ if(!e) tc=parseInt(o.toString().split('\t')[0],10)||0; fin(); });
-    execFile('find',[source,'-type','f'],(e,o)=>{ if(!e) sf=(o.toString().match(/\n/g)||[]).length; fin(); });
-    execFile('find',[target,'-type','f'],(e,o)=>{ if(!e) tf=(o.toString().match(/\n/g)||[]).length; fin(); });
+    // 每个调用都必须有超时：这些 await 在同步主体里，卡住会让 running 永不释放，
+    // 之后所有同步都被判为「已有同步正在运行」。
+    const OPT = { timeout: 120000, maxBuffer: 32 * 1024 * 1024 };
+    execFile('du',['-sb',source],OPT,(e,o)=>{ if(!e) sc=parseInt(o.toString().split('\t')[0],10)||0; fin(); });
+    execFile('du',['-sb',target],OPT,(e,o)=>{ if(!e) tc=parseInt(o.toString().split('\t')[0],10)||0; fin(); });
+    execFile('find',[source,'-type','f'],OPT,(e,o)=>{ if(!e) sf=(o.toString().match(/\n/g)||[]).length; fin(); });
+    execFile('find',[target,'-type','f'],OPT,(e,o)=>{ if(!e) tf=(o.toString().match(/\n/g)||[]).length; fin(); });
   });
+}
+
+// ── 解析 rsync --stats（纯函数，预检与结果统计共用）──────────────
+// 注意 "Number of files: 1 (dir: 1)" 这种形态：空目录时没有 `reg:` 字段，
+// 总数仍是 1（目录自身），所以删除护栏必须看 **reg 正则文件数**，不能看总数。
+export function parseStats(text) {
+  const src = String(text || '');
+  const pick = (re) => { const m = src.match(re); return m ? parseInt(String(m[1]).replace(/,/g,''),10) || 0 : 0; };
+  const regOf = (re) => {
+    const line = src.match(re);
+    if (!line) return 0;
+    const inner = String(line[0]).match(/reg:\s*([\d,]+)/);
+    return inner ? parseInt(inner[1].replace(/,/g,''),10) || 0 : 0;
+  };
+  return {
+    files: pick(/Number of files:\s*([\d,]+)/),
+    filesReg: regOf(/Number of files:[^\n]*/),
+    deleted: pick(/Number of deleted files:\s*([\d,]+)/),
+    deletedReg: regOf(/Number of deleted files:[^\n]*/),
+    transferredBytes: pick(/Total transferred file size:\s*([\d,]+)/),
+    totalFileSize: pick(/Total file size:\s*([\d,]+)/),
+  };
+}
+
+// ── 删除护栏判据（纯函数）─────────────────────────────────────
+// `--delete` 让目标成为源的镜像：源选错 / 设备没就绪 / 目录为空，目标会被整片删掉。
+export function deleteGuard({ sourceFiles, deletes, ratio = 5 }) {
+  if (!deletes || deletes <= 0) return { ok: true };
+  if (!sourceFiles || sourceFiles <= 0) {
+    return { ok: false, reason: `源目录里没有任何条目，却要删除目标中的 ${deletes} 项 —— 疑似设备未就绪或路径选错，已阻止` };
+  }
+  if (deletes > sourceFiles * ratio) {
+    return { ok: false, reason: `预检将删除 ${deletes} 项，超过源目录条目数(${sourceFiles})的 ${ratio} 倍 —— 疑似源路径选错，已阻止` };
+  }
+  return { ok: true };
+}
+
+// ── 预检：一次 dry-run 同时拿到「要写入多少字节」和「会删掉多少项」──
+// 取代原先每次同步都跑的 `du -sb` 全盘扫描（大卷上极慢，超时还会把同步误拦）。
+export function preflight({ source, target, del = false, checksum = false, taskId = null, timeoutMs = 180000 }) {
+  const cmd = buildRsyncCmd({ source, target, del, taskId, checksum, dry: true, keep: false });
+  return new Promise((resolve) => {
+    execFile(cmd[0], cmd.slice(1), { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }, (e, so) => {
+      if (e) {
+        const timedOut = e.killed === true || e.signal === 'SIGTERM' || e.code === 'ETIMEDOUT';
+        return resolve({ ok: false, timedOut, reason: timedOut ? `预检超时（>${Math.round(timeoutMs/1000)}s）` : `预检失败 (${e.message})`, stats: null });
+      }
+      resolve({ ok: true, timedOut: false, stats: parseStats(so) });
+    });
+  });
+}
+
+// ── 目标可用空间（df）──────────────────────────────────────────
+export function freeBytes(target, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    execFile('df', ['-PB1', target], { timeout: timeoutMs }, (e, so) => {
+      if (e) return resolve(null);
+      const last = String(so || '').trim().split('\n').pop() || '';
+      const free = parseInt(last.split(/\s+/)[3] || '0', 10);
+      resolve(Number.isFinite(free) ? free : null);
+    });
+  });
+}
+
+// ── 设备是否已丢失（纯函数）：只有「整目录进不去」才算掉盘，
+//    单个文件在同步中消失（rsync 23/24）是正常局部失败，不能整单判失败
+export function isDeviceLost({ out, source, target, exists = existsSync }) {
+  const text = String(out || '');
+  if (/change_dir .* failed/.test(text)) return true;
+  if (/No space left on device/.test(text)) return false;
+  if (!exists(source) || !exists(target)) return true;
+  return false;
+}
+
+// ── 备份目录清理（keep_history 会一直堆 .rsync-history/<ts>）────
+export function pruneBackupDirs(target, keep = 10) {
+  const dir = join(target, '.rsync-history');
+  try {
+    const names = readdirSync(dir).filter((n) => /^\d{14}$/.test(n)).sort();
+    const drop = names.slice(0, Math.max(0, names.length - keep));
+    for (const n of drop) { try { rmSync(join(dir, n), { recursive: true, force: true }); } catch {} }
+    if (drop.length && _hook?.log) _hook.log(`备份历史已清理 ${drop.length} 个旧版本（保留最近 ${keep} 个）`);
+    return drop.length;
+  } catch { return 0; }
 }
 
 // ── 解析 rsync 输出一行 → 进度 ──────────────────────────────────
@@ -101,15 +216,32 @@ function parseLine(line) {
 // 接收已 spawn 的 child, 返回 Promise: { code, out }
 // 超时策略: 无活动超时 (5 分钟无 stdout/stderr 输出才 kill, 防 /dev 挂死)
 const EXEC_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟无输出才判卡死
+const OUT_TAIL_BYTES = 256 * 1024;          // 内存里只保留输出尾部（失败判定/统计都在尾部）
+const LOG_FLUSH_MS = 400;                   // 日志按批落盘，避免每个 chunk 都同步写盘
 function execRsync(child, synclog, onProgress) {
   return new Promise((res) => {
     let out = '', done = false;
     let lastActivity = Date.now();
     let timer = null;
+    let buf = '', flushTimer = null;
+    const flush = () => {
+      if (!synclog || !buf) { buf = ''; return; }
+      const chunk = buf; buf = '';
+      try { appendFileSync(synclog, chunk); }
+      catch { if (_hook?.log) _hook.log('appendFileSync(sync.log) failed'); }
+    };
+    const pushLog = (str) => {
+      if (!synclog) return;
+      buf += str;
+      if (buf.length >= 64 * 1024) { if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; } flush(); return; }
+      if (!flushTimer) flushTimer = setTimeout(() => { flushTimer = null; flush(); }, LOG_FLUSH_MS);
+    };
     const fin = (code) => {
       if (!done) {
         done = true;
         if (timer) clearTimeout(timer);
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        flush();
         if (_hook?.log) _hook.log(`execRsync done code=${code} (stdout ${out.length}B)`);
         res({ code, out });
       }
@@ -132,8 +264,8 @@ function execRsync(child, synclog, onProgress) {
     child.stdout.on('data', (d) => {
       touch();
       const str = d.toString();
-      out += str;
-      if (synclog) { try { appendFileSync(synclog, str); } catch { if (_hook?.log) _hook.log('appendFileSync(sync.log) failed'); } }
+      out = (out + str).slice(-OUT_TAIL_BYTES);
+      pushLog(str);
       const lines = str.split(/\r?\n/);
       for (const line of lines) {
         const p = parseLine(line);
@@ -142,8 +274,9 @@ function execRsync(child, synclog, onProgress) {
     });
     child.stderr.on('data', (d) => {
       touch();
-      out += d.toString();  // stderr 也收进 out 用于失败原因判断 (如 change_dir failed)
-      if (synclog) { try { appendFileSync(synclog, d.toString()); } catch {} }
+      const str = d.toString();
+      out = (out + str).slice(-OUT_TAIL_BYTES);  // stderr 也收进尾部用于失败原因判断
+      pushLog(str);
     });
     child.on('error', (e) => {
       try { if (_hook?.log) _hook.log(`rsync spawn error: ${e.message}`); } catch {}
@@ -180,7 +313,9 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
     let exitCode = -1;
     let attempt = 0;
     let out = '';
-    let deadEncountered = false;  // 源/目标不可用 (USB拔出等), 即使 code 为 23 也算失败
+    let deadEncountered = false;  // 源/目标根目录不可用 (USB拔出等)
+    // keep_history: 先清理过旧的备份快照，否则 .rsync-history 会无限堆积占满目标盘
+    if (opts.keep) { try { pruneBackupDirs(opts.target, 10); } catch {} }
     if (_hook?.log) _hook.log(`startSync cmd: ${cmd.join(' ')}`);
     for (attempt = 1; attempt <= maxRetry + 1; attempt++) {
       if (attempt > 1) setStatus('syncing', 0, '', `第 ${attempt} 次尝试`, '', 0);
@@ -189,8 +324,9 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
       const r = await execRsync(child, synclog, (p) => setStatus('syncing', p.pct, p.file, p.file, p.speed, 0));
       if (_hook?.log) _hook.log(`rsync attempt ${attempt} finished code=${r.code}`);
       if (stopRequested) break;
-      // 23 可能是部分传输失败 —— 若 stderr 显示源/目标不可用 (USB拔出等), 判为失败并停止重试
-      const deadMark = /change_dir .* failed|No such file or directory/.test(r.out);
+      // 只有「整目录进不去」才算掉盘；单个文件在同步中消失（rsync 23/24）
+      // 属于正常局部失败，不能整单判失败（否则会白占了 pending 的重试次数）
+      const deadMark = isDeviceLost({ out: r.out, source: opts.source, target: opts.target });
       if (deadMark) deadEncountered = true;
       if ([0,24].includes(r.code) || (r.code === 23 && !deadMark)) { exitCode = r.code; out = r.out; break; }
       if (deadMark) break;  // 源/目标不可用, 立即重试无意义, 交待补机制处理
@@ -206,8 +342,10 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
                                      checksum:opts.checksum, dry:false, keep:opts.keep });
       const child2 = spawn(revCmd[0], revCmd.slice(1), { stdio:['ignore','pipe','pipe'] });
       currentChild = child2;
+      if (opts.keep) { try { pruneBackupDirs(opts.source, 10); } catch {} }
       const r = await execRsync(child2, synclog, (p) => setStatus('syncing', p.pct, p.file, p.file, p.speed, 0));
       if (stopRequested) exitCode = -999; else exitCode = r.code;
+      out = (out + r.out).slice(-OUT_TAIL_BYTES);
     }
 
     const end = epoch();
@@ -222,14 +360,13 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
 
     setStatus(success ? 'idle' : 'error', success ? 100 : 0, '', msg, '', 0);
 
-    // 从日志提取传输统计
+    // 传输统计：直接从本次输出尾部解析（原来每次都要整份读 sync.log，5MB 级很贵）
     let bytes = 0, files = 0;
     try {
-      const tailSrc = readFileSync(synclog,'utf8').split('\n').slice(-100).join('\n');
-      const bm = tailSrc.match(/Total transferred file size:\s*([\d,]+)/);
-      const fm = tailSrc.match(/Number of regular files transferred:\s*([\d,]+)/);
-      if (bm) bytes = parseInt(bm[1].replace(/,/g,''),10) || 0;
-      if (fm) files = parseInt(fm[1].replace(/,/g,''),10) || 0;
+      const st = parseStats(out);
+      bytes = st.transferredBytes || 0;
+      const fm = String(out).match(/Number of regular files transferred:\s*([\d,]+)/);
+      files = fm ? (parseInt(fm[1].replace(/,/g,''),10) || 0) : (st.files || 0);
     } catch {}
 
     // 差异对比 (源 vs 目标)
@@ -256,8 +393,23 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
           if (_resolveDone) _resolveDone({ success:false, message:`同步异常: ${e.message}`, exit_code:-999 });
         });
 
-  return { status: 'running', message: '同步已开始', stop: () => { stopRequested = true; if (currentChild) { try { currentChild.kill('SIGTERM'); } catch {} } },
-             donePromise };
+  // stop: 先 SIGTERM，10s 仍未退出则 SIGKILL。
+  // 只发 SIGTERM 的话，卡在 IO 上的 rsync 会不响应，用户看到「停止中」但进程还在写目标。
+  const stop = () => {
+    stopRequested = true;
+    const child = currentChild;
+    if (!child) return;
+    try { child.kill('SIGTERM'); } catch {}
+    const t = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        try { if (_hook?.log) _hook.log(`rsync 未响应 SIGTERM，10s 后强制 SIGKILL pid=${child.pid}`); } catch {}
+        try { child.kill('SIGKILL'); } catch {}
+      }
+    }, 10000);
+    if (typeof t.unref === 'function') t.unref();
+  };
+
+  return { status: 'running', message: '同步已开始', stop, donePromise };
   }
 
 // 供 server.js 判断是否有 rsync 运行中 (由 server.js 维护 syncActive)
