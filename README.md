@@ -1,4 +1,4 @@
-# USB Rsync — Node.js 版 (v0.4.7)
+# USB Rsync — Node.js 版 (v0.4.8)
 
 > USB 存储设备自动同步工具，检测到 USB 设备插入后自动同步指定目录，支持单向和双向同步模式。
 > **Node.js 重写版** — 由 bash CGI + bash 守护架构迁移为纯 Node.js 单进程架构。
@@ -75,6 +75,37 @@ fnpack build .
 - `logs/sync.log` — rsync 日志
 
 ## 版本历史
+
+### v0.4.8 — 全面安全审计修复（数据安全 + 接口面 + 运维）
+
+用 `code-audit` 审完全部 3,384 行后按严重度修（凭据类按用户要求保持不动）：
+
+**数据安全（最关键）**
+- `--delete` 加了预检护栏：同步前先跑一次 `rsync --dry-run --stats`，
+  · 源侧正则文件数为 0 却要删东西 → 直接阻止（设备没就绪 / 路径选错 / 目录被清空）
+  · 删除量 > 源文件数 × 5 → 阻止（疑似源路径选错）
+  · 带删除且预检失败 → fail-closed，宁可不跑
+  · 手动 / 插入自动 / 计划 / 待补 **四条路径统一走同一道关**
+- 掉盘判定收窄：只有 `change_dir failed` 或源/目标根目录消失才算掉盘，
+  单文件在同步中消失（rsync 23/24）不再整单判失败、不再白占待补重试次数
+- 停止增加 SIGKILL 升级：SIGTERM 后 10 秒仍未退出则强杀（卡 IO 的 rsync 不理 TERM）
+
+**接口面**
+- `/sync_stop`、`/preview`、`/config_import` 必须 POST（原来 GET 即可触发状态变更）
+- `/save_file` 内容改为服务端自取（原来 `kind=log` 会写客户端传来的任意文本）
+- `/tasks`、`/config_import` 增加结构校验（任务数 ≤200、字段类型/长度、排除规则上限）
+- PORT 调试模式只绑 `127.0.0.1`（该模式无网关鉴权）
+
+**运维与显示**
+- `usbrsync.log` 增加轮转（>5MB 滚 `.1.bak`）
+- 启动复位残留的 `syncing` 状态；`uncaughtException` 复位 running 防止同步永久占锁
+- 空间检查不再每次全量 `du -sb`，改用预检的传输量 + `df`
+- 同步日志批量落盘、内存只留输出尾部 256KB；传输统计不再整份读 sync.log
+- `.rsync-history` 只保留最近 10 份备份（原来会无限堆积占满目标盘）
+- 前端接口失败不再伪装成「还没有同步任务」，KPI 也不会被失败响应覆盖成 0
+
+**测试**：新增 `tests/test_rsync_guards.js` 18 项；E2E 从 13 项扩到 19 项
+（含真实 rsync 的 --delete 拦截/放行、路径穿越、CSRF）。全量 70 项通过。
 
 ### v0.4.7
 
