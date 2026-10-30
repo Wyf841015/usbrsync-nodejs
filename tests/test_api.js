@@ -331,6 +331,49 @@ test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
     assert.equal(lim.body.total, all.body.history.length, 'total 应是未裁剪的总数');
   });
 
+  await t.test('history: 记录任务名称（含老记录按 task_id 回填）', async () => {
+    const fs = await import('node:fs');
+    const base = '/tmp/usbrsync-name';
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.mkdirSync(`${base}/a`, { recursive: true });
+    fs.mkdirSync(`${base}/b`, { recursive: true });
+    fs.writeFileSync(`${base}/a/x.txt`, 'x');
+    t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+
+    // 建一个有名字的任务，保证回填能查到
+    await api('/api/tasks', 'POST', { sync_tasks: [
+      { id: 'named1', name: '我的备份任务', source: `${base}/a`, target: `${base}/b` },
+    ] });
+
+    const wait = async () => {
+      for (let i = 0; i < 60; i++) {
+        const st = await api('/api/sync_status');
+        if (['idle', 'error'].includes(st.body.sync.status)) return;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    };
+
+    // ① 带 name 触发 → 历史里直接有任务名
+    await api('/api/sync', 'POST', { name: '我的备份任务', task_id: 'named1',
+      source: `${base}/a`, target: `${base}/b` });
+    await wait();
+    let h = await api('/api/history?limit=1');
+    assert.equal(h.body.history.at(-1).task_name, '我的备份任务');
+
+    // ② 不带 name（模拟旧版本/直接调接口）→ 读接口时按 task_id 回填
+    await api('/api/sync', 'POST', { task_id: 'named1', source: `${base}/a`, target: `${base}/b` });
+    await wait();
+    h = await api('/api/history?limit=1');
+    const last = h.body.history.at(-1);
+    assert.equal(last.task_name, '我的备份任务', '老记录应能按 task_id 回填任务名');
+
+    // ③ 统计的按任务汇总也用任务名
+    const st = await api('/api/stats');
+    const row = (st.body.by_task || []).find((x) => x.task_id === 'named1');
+    assert.ok(row, JSON.stringify(st.body.by_task));
+    assert.equal(row.task_name, '我的备份任务');
+  });
+
   await t.test('history clear + stats', async () => {
     await api('/api/history?action=clear', 'POST', {});
     const r = await api('/api/history');

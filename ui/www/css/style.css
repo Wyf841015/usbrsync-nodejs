@@ -627,6 +627,18 @@ code, .mono { font-family: var(--font-mono); font-size: 0.94em; }
 .hist-row.fail { box-shadow: inset 2px 0 0 var(--bad); }
 .hist-main b, .hist-main small { display: block; }
 .hist-main b { font-size: 12px; font-weight: 600; font-family: var(--font-mono); overflow-wrap: anywhere; }
+.hist-main b.task-name { font-family: var(--font); font-size: 12.5px; }
+.hist-main .hist-path {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  font-style: normal;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .hist-main small { margin-top: 3px; font-size: 11px; color: var(--text-3); }
 .hist-row code { text-align: right; color: var(--text-3); font-size: 11px; }
 .hist-row .chev { color: var(--text-3); font-size: 10px; font-style: normal; transition: transform var(--t-fast); }

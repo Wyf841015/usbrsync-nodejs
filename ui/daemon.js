@@ -130,7 +130,7 @@ export function createDaemon({
 
       await fire({
         source: task.source, target: task.target, bidirectional: !!task.bidirectional,
-        use_delete: !!task.use_delete, task_id: task.id, retry_count: task.retry_count || 0,
+        use_delete: !!task.use_delete, task_id: task.id, retry_count: task.retry_count || 0, name: task.name || '',
         retry_delay: task.retry_delay || 5, checksum: !!task.checksum, notify: true,
         keep_history: !!task.keep_history, auto: true,
       }, key, task.name || key, 'auto sync');
@@ -176,7 +176,7 @@ export function createDaemon({
       lastPendingTry.set(item.task_id, now());
       const st = await fire({
         source: item.source, target: item.target, bidirectional: !!item.bidirectional,
-        use_delete: !!item.use_delete, task_id: item.task_id, retry_count: 0,
+        use_delete: !!item.use_delete, task_id: item.task_id, retry_count: 0, name: item.name || '',
         retry_delay: 5, checksum: !!item.checksum, keep_history: !!item.keep_history,
         notify: true, auto: true, pending_retry: true,
       }, `pending:${item.task_id}`, `补做 ${item.task_id}`, 'pending resync');
@@ -221,7 +221,7 @@ export function createDaemon({
       }
       await fire({
         source: task.source, target: task.target, bidirectional: !!task.bidirectional,
-        use_delete: !!task.use_delete, task_id: task.id, retry_count: task.retry_count || 0,
+        use_delete: !!task.use_delete, task_id: task.id, retry_count: task.retry_count || 0, name: task.name || '',
         retry_delay: task.retry_delay || 5, checksum: !!task.checksum, notify: true,
         keep_history: !!task.keep_history, auto: true,
       }, key, task.name || key, `scheduled sync ${hm}`);

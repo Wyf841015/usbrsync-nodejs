@@ -16,7 +16,7 @@ import { collectUsbMounts } from './usb.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
-const VERSION = '0.4.9';
+const VERSION = '0.4.10';
 
 // ── 数据目录 ───────────────────────────────────────────────────
 const DATA_BASE = process.env.TRM_PKGVAR || '/tmp/usbrsync-nodejs';
@@ -110,6 +110,25 @@ function loadTasks() {
   try { return JSON.parse(readFileSync(TASKS_FILE,'utf8')); }
   catch { return { sync_tasks:[], exclusions:[...DEFAULT_EXCLUSIONS] }; }
 }
+// 历史记录里的任务名：v0.4.9 之前的记录没有 task_name 字段，
+// 读接口时按 task_id 回查当前任务表补上，老记录也能显示名字。
+function taskNameOf(taskId) {
+  if (!taskId) return '';
+  const id = String(taskId);
+  if (id.includes('(restore)')) {
+    const base = id.replace(/\(restore\)/g, '').trim();
+    return `恢复：${taskNameOf(base) || base || '未知任务'}`;
+  }
+  try {
+    const list = loadTasks().sync_tasks || [];
+    const t = list.find((x) => x && x.id === id);
+    return (t && t.name) || '';
+  } catch { return ''; }
+}
+function withTaskNames(list) {
+  return (list || []).map((e) => (e && !e.task_name) ? { ...e, task_name: taskNameOf(e.task_id) } : e);
+}
+
 function saveTasks(o) {
   // 唯一临时名防并发覆盖 (history clear 与 appendHistory 可能并发)
   const t = `${TASKS_FILE}.${process.pid}.${Date.now()}.tmp`;
@@ -181,7 +200,7 @@ function savePending(a) {
 function addPending(item) {
   const list = loadPending();
   const idx = list.findIndex(x=>x.task_id===item.task_id);
-  const rec = { task_id:item.task_id, source:item.source, target:item.target,
+  const rec = { task_id:item.task_id, name:item.name||'', source:item.source, target:item.target,
                 bidirectional:item.bidirectional, use_delete:item.use_delete,
                 checksum:item.checksum, keep_history:item.keep_history, attempts:(idx>=0?list[idx].attempts:0)+1 };
   if (idx>=0) list[idx]=rec; else list.push(rec);
@@ -468,7 +487,7 @@ async function handleApi(pathname, req, res) {
       case '/history': {
         const q = readQuery(req);
         if (/^(DELETE|POST)$/.test(method) && q.action === 'clear') saveHistory([]);
-        const all = loadHistory();
+        const all = withTaskNames(loadHistory());
         let h = all;
         // 支持按结果/任务筛选 + 限制条数（前端「全部/成功/失败」切换和详情用）
         if (q.result === 'ok') h = h.filter(x => x.success);
@@ -479,7 +498,7 @@ async function handleApi(pathname, req, res) {
         send(res,200,{ success:true, history:h, total:all.length }); return;
       }
       case '/stats': {
-        const h = loadHistory();
+        const h = withTaskNames(loadHistory());
         const now = Math.floor(Date.now()/1000);
         let total=0, ok=0, partial=0, bytes=0, duration=0, files=0, deleted=0;
         let speedSum = 0, speedN = 0;

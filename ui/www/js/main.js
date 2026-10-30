@@ -5,7 +5,7 @@ async function api(path,method='GET',body){const c=new AbortController(),timer=s
 function toast(msg,type='info'){const e=document.createElement('div');e.className='toast '+type;e.textContent=msg;document.body.appendChild(e);setTimeout(()=>e.remove(),2800)}
 function size(n){n=Number(n)||0;if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<u.length-1);return n.toFixed(n<10?2:1)+' '+u[i]}
 function duration(n){n=Number(n)||0;return n<60?n+'秒':Math.floor(n/60)+'分'+n%60+'秒'}
-function taskPayload(t,i){return{source:t.source,target:t.target,bidirectional:!!t.bidirectional,use_delete:!!t.use_delete,task_id:t.id||'task_'+i,retry_count:+t.retry_count||0,retry_delay:+t.retry_delay||5,checksum:!!t.checksum,notify:!!t.notify,check_space:t.check_space!==false,keep_history:!!t.keep_history||!!t.keep}}
+function taskPayload(t,i){return{name:t.name||'',source:t.source,target:t.target,bidirectional:!!t.bidirectional,use_delete:!!t.use_delete,task_id:t.id||'task_'+i,retry_count:+t.retry_count||0,retry_delay:+t.retry_delay||5,checksum:!!t.checksum,notify:!!t.notify,check_space:t.check_space!==false,keep_history:!!t.keep_history||!!t.keep}}
 async function loadAll(){await Promise.all([loadStatus(),loadDevices(),loadTasks(),loadHistory(),loadDrives()])}
 async function loadStatus(){const r=await api('/api/status');if(!r.success)return;$('status-text').textContent=r.device_count?`已连接 ${r.device_count} 个设备`:'等待 USB 设备';$('k-device').textContent=r.device_count;$('k-task').textContent=r.tasks_count;updateSyncUI(r.sync)}
 async function loadDevices(){const r=await api('/api/devices');
@@ -114,14 +114,18 @@ function drawHistory(st){
   box.innerHTML=list.map(h=>{
     const files=h.files_done??h.files??0;
     const opts=[h.use_delete?'--delete':'',h.bidirectional?'双向':'',h.checksum?'校验':''].filter(Boolean).join(' · ')||'默认';
+    const tname=(h.task_name||'').trim();
     return `<div class="hist-row ${h.success?'':'fail'}" onclick="toggleHist(this)">
       <span class="status ${h.success?'ok':'bad'}">${h.success?(h.partial?'部分':'成功'):'失败'}</span>
       <div class="hist-main">
-        <b title="${esc(h.source)} → ${esc(h.target)}">${esc(h.source)} → ${esc(h.target)}</b>
+        <b class="task-name">${tname?esc(tname):esc(h.source)+' → '+esc(h.target)}</b>
+        ${tname?`<em class="hist-path" title="${esc(h.source)} → ${esc(h.target)}">${esc(h.source)} → ${esc(h.target)}</em>`:''}
         <small>${new Date((h.finished_at||0)*1000).toLocaleString()} · 耗时 ${duration(h.duration)} · ${files} 文件 · ${size(h.bytes)}${h.deleted?` · 删除 ${h.deleted}`:''}${h.attempts>1?` · 尝试 ${h.attempts} 次`:''}${h.speed_bps?` · 均速 ${bps(h.speed_bps)}`:''}</small>
       </div>
       <code>${esc(h.exit_code??'-')}</code><i class="chev">▾</i>
       <div class="hist-detail">
+        <div class="hd-row"><span>任务</span><b>${tname?esc(tname):'（未命名 / 旧记录）'}</b></div>
+        <div class="hd-row"><span>源 → 目标</span><b>${esc(h.source)} → ${esc(h.target)}</b></div>
         <div class="hd-row"><span>结果</span><b>${esc(h.message||'')}</b></div>
         <div class="hd-row"><span>退出码</span><b>${esc(h.exit_code??'-')}${h.exit_meaning?' · '+esc(h.exit_meaning):''}</b></div>
         <div class="hd-row"><span>开始 / 结束</span><b>${new Date((h.started_at||0)*1000).toLocaleString()} → ${new Date((h.finished_at||0)*1000).toLocaleTimeString()}</b></div>
