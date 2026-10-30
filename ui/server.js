@@ -252,7 +252,8 @@ async function requestSync(p) {
     // 用 reg（正则文件）计数判空：`Number of files` 含目录自身，空目录也是 1
     const guard = rsync.deleteGuard({ sourceFiles: st.filesReg, deletes: st.deletedReg || st.deleted });
     if (!guard.ok) {
-      setSyncStatus('idle', 0, '', '预检已阻止本次同步', '', 0);
+      // 把拦截原因直接显示在状态栏（用户看到"什么都没发生"时最需要的就是原因）
+      setSyncStatus('idle', 0, '', `预检阻止：${guard.reason.slice(0, 80)}`, '', 0);
       log(`preflight blocked delete: ${guard.reason} (${p.source} → ${p.target})`);
       return { status:'error', message: guard.reason };
     }
