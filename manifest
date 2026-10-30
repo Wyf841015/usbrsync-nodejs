@@ -1,5 +1,5 @@
 appname               = usbrsync
-version               = 0.4.11
+version               = 0.5.0
 display_name          = USB自动同步
 desc                  = USB存储设备自动同步工具，检测到USB设备插入后自动同步指定目录，支持单向和双向同步模式
 platform              = all
