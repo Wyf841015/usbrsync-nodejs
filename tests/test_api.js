@@ -282,6 +282,26 @@ test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
     assert.equal(ok.status, 200);
   });
 
+  await t.test('preview POST 正常返回对比数据', async () => {
+    const fs = await import('node:fs');
+    const base = '/tmp/usbrsync-preview';
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.mkdirSync(`${base}/src`, { recursive: true });
+    fs.mkdirSync(`${base}/tgt`, { recursive: true });
+    fs.writeFileSync(`${base}/src/a.txt`, 'aaa');
+    t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+
+    const r = await api('/api/preview', 'POST', { source: `${base}/src`, target: `${base}/tgt` });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.success, true, JSON.stringify(r.body));
+  });
+
+  await t.test('sync_stop POST 在空闲时也返回成功', async () => {
+    const r = await api('/api/sync_stop', 'POST', {});
+    assert.equal(r.status, 200);
+    assert.equal(r.body.success, true);
+  });
+
   await t.test('history clear + stats', async () => {
     await api('/api/history?action=clear', 'POST', {});
     const r = await api('/api/history');
