@@ -123,7 +123,7 @@ function drawHistory(st){
       <code>${esc(h.exit_code??'-')}</code><i class="chev">▾</i>
       <div class="hist-detail">
         <div class="hd-row"><span>结果</span><b>${esc(h.message||'')}</b></div>
-        <div class="hd-row"><span>退出码</span><b>${esc(h.exit_code??'-')} · ${esc(h.exit_meaning||'')}</b></div>
+        <div class="hd-row"><span>退出码</span><b>${esc(h.exit_code??'-')}${h.exit_meaning?' · '+esc(h.exit_meaning):''}</b></div>
         <div class="hd-row"><span>开始 / 结束</span><b>${new Date((h.started_at||0)*1000).toLocaleString()} → ${new Date((h.finished_at||0)*1000).toLocaleTimeString()}</b></div>
         <div class="hd-row"><span>本次需传输</span><b>${h.bytes_total?size(h.bytes_total):'—'}</b></div>
         <div class="hd-row"><span>选项</span><b>${opts}${h.keep_history?' · 保留历史':''}</b></div>
