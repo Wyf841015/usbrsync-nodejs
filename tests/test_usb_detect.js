@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  flattenLsblk, isUsbNode, mountSignature, diffMounts,
+  flattenLsblk, isUsbNode, mountSignature, diffMounts, fixEncoding,
   unescapeMountPoint, isRemovableBySysfs, collectUsbMounts, pathReady,
 } from '../ui/usb.js';
 import { createDaemon } from '../ui/daemon.js';
@@ -124,6 +124,54 @@ test('USB 上的 btrfs 被识别（旧版 fs 白名单会漏）', () => {
 test('loop / dm / md 一律不是 USB', () => {
   for (const name of ['loop0', 'dm-0', 'md0', 'zram0', 'sr0']) {
     assert.equal(isUsbNode({ name, type: 'loop', eff_tran: 'usb', eff_rm: true }), false, name);
+  }
+});
+
+// ── 卷标编码：U 盘 FAT 卷标常由 Windows 按 GBK 写入，UTF-8 解码会变 � ──
+const latin1 = (buf) => buf.toString('latin1');
+
+test('GBK 卷标按字节解码（Windows 默认「新加卷」）', () => {
+  const gbkBytes = Buffer.from('d0c2bcd3beed', 'hex');   // 「新加卷」的 GBK 编码
+  assert.equal(fixEncoding(latin1(gbkBytes)), '新加卷');
+});
+
+test('UTF-8 卷标保持原样', () => {
+  assert.equal(fixEncoding(latin1(Buffer.from('我的优盘', 'utf8'))), '我的优盘');
+});
+
+test('纯 ASCII 卷标不受影响', () => {
+  assert.equal(fixEncoding('KINGSTON'), 'KINGSTON');
+  assert.equal(fixEncoding(''), '');
+});
+
+test('无法识别的字节不留替换符（避免界面出现 �）', () => {
+  const junk = latin1(Buffer.from('ff fe 81 82', 'hex'));
+  const out = fixEncoding(junk);
+  assert.ok(!out.includes('\uFFFD'), `仍含替换符: ${JSON.stringify(out)}`);
+  assert.ok(out.length > 0, '不应返回空字符串');
+});
+
+test('flattenLsblk 会把 GBK 卷标解码后再交给上层', () => {
+  const fixture = {
+    blockdevices: [{
+      name: 'sdz', type: 'disk', rm: true, tran: 'usb', mountpoint: null, size: 1000,
+      children: [{
+        name: 'sdz1', type: 'part', rm: true, tran: null, fstype: 'vfat',
+        mountpoint: '/vol00/ProductCode_1',
+        label: latin1(Buffer.from('d0c2bcd3beed', 'hex')), size: 900, children: [],
+      }],
+    }],
+  };
+  const n = flattenLsblk(fixture).find((x) => x.name === 'sdz1');
+  assert.equal(n.label, '新加卷');
+  assert.equal(n.mountpoint, '/vol00/ProductCode_1');
+});
+
+test('真实机器上任何卷标/挂载点都不含替换符', async () => {
+  const list = await collectUsbMounts();
+  for (const m of list) {
+    assert.ok(!String(m.label).includes('\uFFFD'), `卷标乱码: ${m.label}`);
+    assert.ok(!String(m.mount_point).includes('\uFFFD'), `挂载点乱码: ${m.mount_point}`);
   }
 });
 

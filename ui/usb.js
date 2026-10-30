@@ -50,8 +50,8 @@ export function flattenLsblk(json) {
       eff_tran: tran,
       eff_rm: rm,
       fstype: node.fstype || '',
-      mountpoint: node.mountpoint || null,
-      label: node.label || '',
+      mountpoint: node.mountpoint ? fixEncoding(node.mountpoint) : null,
+      label: node.label ? fixEncoding(node.label) : '',
       uuid: node.uuid || '',
       size: node.size || 0,
       ro: truthy(node.ro),
@@ -73,16 +73,46 @@ export function isUsbNode(node) {
   return false;
 }
 
+// ── 卷标/挂载点乱码修复 ─────────────────────────────────────────
+// U 盘分区标签是 FAT 卷标，Windows 默认按 GBK/CP936 写入（例如「新加卷」的字节是
+// d0 c2 bc d3 be ed）。lsblk 原样吐出这些字节，Node 与浏览器一律按 UTF-8 解码，
+// 非法序列就变成 U+FFFD（界面显示 "�¼Ӿ�"）。这里把字符串按 1:1 还原成原始
+// 字节，再依次尝试：严格 UTF-8 → GBK → 宽松 UTF-8（去替换符）→ 十六进制兜底。
+const utf8Strict = (() => { try { return new TextDecoder('utf-8', { fatal: true }); } catch { return null; } })();
+const gbkDecoder = (() => { try { return new TextDecoder('gbk', { fatal: false }); } catch { return null; } })();
+const utf8Loose = (() => { try { return new TextDecoder('utf-8'); } catch { return null; } })();
+
+export function fixEncoding(input) {
+  if (input === null || input === undefined) return '';
+  const str = String(input);
+  // latin1 解码后的字符串里 0x80 以上都是单字节映射，这里还原真实字节
+  const bytes = Buffer.from(str, 'latin1');
+  if (!bytes.some((b) => b >= 0x80)) return str.replace(/[\u0000-\u001f]/g, '');
+
+  if (utf8Strict) {
+    try { return utf8Strict.decode(bytes).replace(/[\u0000-\u001f]/g, ''); } catch { /* 不是 UTF-8 */ }
+  }
+  if (gbkDecoder) {
+    try {
+      const t = gbkDecoder.decode(bytes);
+      if (t && !t.includes('\uFFFD')) return t.replace(/[\u0000-\u001f]/g, '').trim();
+    } catch { /* 继续兜底 */ }
+  }
+  const loose = (utf8Loose ? utf8Loose.decode(bytes) : str).replace(/\uFFFD+/g, '').trim();
+  return loose || bytes.toString('hex').toUpperCase();
+}
+
 // ── 系统调用封装（异步 + 超时，绝不阻塞事件循环）──────────────
+// 取原始 Buffer 而不是 String：卷标可能是非 UTF-8，先按 latin1 保字节再自行解码
 function run(cmd, args, timeoutMs = 5000) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
     const timer = setTimeout(() => finish(null), timeoutMs);
     try {
-      execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (e, out) => {
+      execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, encoding: 'buffer' }, (e, out) => {
         clearTimeout(timer);
-        finish(e ? null : String(out));
+        finish(e ? null : out);
       });
     } catch { clearTimeout(timer); finish(null); }
   });
@@ -105,12 +135,12 @@ export function isRemovableBySysfs(device) {
 function collectFromProcMounts() {
   const list = [];
   let raw = '';
-  try { raw = readFileSync('/proc/mounts', 'utf8'); } catch { return list; }
+  try { raw = readFileSync('/proc/mounts').toString('latin1'); } catch { return list; }
   for (const line of raw.split('\n')) {
     const parts = line.split(' ');
     if (parts.length < 3) continue;
     const device = parts[0];
-    const mount_point = unescapeMountPoint(parts[1]);
+    const mount_point = fixEncoding(unescapeMountPoint(parts[1]));
     const fs_type = parts[2];
     if (!device.startsWith('/dev/')) continue;
     if (!isRemovableBySysfs(device)) continue;
@@ -128,7 +158,8 @@ export async function collectUsbMounts() {
   const raw = await run('lsblk', ['-J', '-b', '-o', LSBLK_COLS]);
   if (raw) {
     try {
-      const nodes = flattenLsblk(JSON.parse(raw));
+      // latin1 是字节 1:1 映射，JSON 结构本身是 ASCII，解析安全；字段内容随后再解码
+      const nodes = flattenLsblk(JSON.parse(raw.toString('latin1')));
       const list = [];
       for (const n of nodes) {
         if (!n.mountpoint) continue;
