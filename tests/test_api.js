@@ -302,6 +302,35 @@ test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
     assert.equal(r.body.success, true);
   });
 
+  await t.test('stats: 聚合字段完整（成功率/7 天趋势/按任务/失败原因）', async () => {
+    const r = await api('/api/stats');
+    assert.equal(r.status, 200);
+    const d = r.body;
+    for (const k of ['total', 'ok', 'fail', 'partial', 'bytes', 'duration', 'success_rate',
+                     'avg_duration', 'avg_speed', 'avg_bytes', 'files', 'deleted',
+                     'last_ok_at', 'last_fail_at', 'daily', 'by_task', 'top_errors', 'last24h']) {
+      assert.ok(Object.prototype.hasOwnProperty.call(d, k), `缺少字段 ${k}`);
+    }
+    assert.equal(Array.isArray(d.daily), true);
+    assert.equal(d.daily.length, 7, '趋势应补齐 7 天');
+    assert.ok(d.daily.every((x) => typeof x.date === 'string' && typeof x.total === 'number'));
+    assert.equal(Array.isArray(d.by_task), true);
+    assert.equal(Array.isArray(d.top_errors), true);
+    assert.ok(typeof d.last24h.bytes === 'number' && typeof d.last24h.total === 'number');
+  });
+
+  await t.test('history: 支持 result / limit 筛选', async () => {
+    const all = await api('/api/history');
+    const ok = await api('/api/history?result=ok');
+    const fail = await api('/api/history?result=fail');
+    assert.equal(ok.body.history.every((x) => x.success), true);
+    assert.equal(fail.body.history.every((x) => !x.success), true);
+    assert.equal(ok.body.history.length + fail.body.history.length, all.body.history.length);
+    const lim = await api('/api/history?limit=1');
+    assert.ok(lim.body.history.length <= 1);
+    assert.equal(lim.body.total, all.body.history.length, 'total 应是未裁剪的总数');
+  });
+
   await t.test('history clear + stats', async () => {
     await api('/api/history?action=clear', 'POST', {});
     const r = await api('/api/history');

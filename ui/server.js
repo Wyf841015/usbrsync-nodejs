@@ -67,8 +67,10 @@ function log(msg) {
 }
 // 状态写盘节流: 进度刷新高频(每秒多次), 300ms 合并写, 原子替换防撕裂
 let _statusTimer = null;
-function setSyncStatus(s, p=0, f='', m='', sp='', n=0) {
-  syncState = { status:s, progress:p, current_file:f, message:m, speed:sp, xfr_num:n };
+function setSyncStatus(s, p=0, f='', m='', sp='', n=0, extra=null) {
+  // extra 里是进度详情（已传字节/总量、ETA、文件计数、删除数…）
+  // 整体重建而不是合并：切回 idle 时旧进度字段必须消失，否则界面会显示上一次的数字
+  syncState = { status:s, progress:p, current_file:f, message:m, speed:sp, xfr_num:n, ...(extra || {}) };
   if (_statusTimer) return; // 已有待写, 合并
   _statusTimer = setTimeout(() => {
     _statusTimer = null;
@@ -282,6 +284,9 @@ async function requestSync(p) {
     source:p.source, target:p.target, bidirectional:p.bidirectional,
     del:p.use_delete, taskId:p.task_id, retry:p.retry_count,
     delay:p.retry_delay, checksum:p.checksum, keep:p.keep_history, notify:p.notify,
+    // 预检拿到的「本次需要传输的字节数」：进度条用它算 x/y，历史用它记录总量
+    totalBytes: (pre && pre.ok && pre.stats && pre.stats.transferredBytes) || 0,
+    taskName: p.name || '',
   }, { setStatus:setSyncStatus, synclog:SYNCLOG, appendHistory, notify:notifyDone });
   running = ctl;
   // 完成后清 running (startSync 返回 donePromise, 在完成时 resolve)
@@ -460,13 +465,69 @@ async function handleApi(pathname, req, res) {
       case '/history': {
         const q = readQuery(req);
         if (/^(DELETE|POST)$/.test(method) && q.action === 'clear') saveHistory([]);
-        send(res,200,{ success:true, history:loadHistory() }); return;
+        const all = loadHistory();
+        let h = all;
+        // 支持按结果/任务筛选 + 限制条数（前端「全部/成功/失败」切换和详情用）
+        if (q.result === 'ok') h = h.filter(x => x.success);
+        else if (q.result === 'fail') h = h.filter(x => !x.success);
+        if (q.task_id) h = h.filter(x => x.task_id === q.task_id);
+        const lim = parseInt(q.limit, 10);
+        if (Number.isFinite(lim) && lim > 0) h = h.slice(-lim);
+        send(res,200,{ success:true, history:h, total:all.length }); return;
       }
       case '/stats': {
         const h = loadHistory();
-        let total=0,ok=0,bytes=0,duration=0;
-        for (const e of h) { total++; if(e.success)ok++; bytes+=e.bytes||0; duration+=e.duration||0; }
-        send(res,200,{ success:true,total,ok,fail:total-ok,bytes,duration }); return;
+        const now = Math.floor(Date.now()/1000);
+        let total=0, ok=0, partial=0, bytes=0, duration=0, files=0, deleted=0;
+        const byTask = new Map(), errCount = new Map(), daily = new Map();
+        let lastOk = 0, lastFail = 0;
+        for (const e of h) {
+          total++; if (e.success) ok++;
+          if (e.partial) partial++;
+          const b = e.bytes || 0, d = e.duration || 0;
+          bytes += b; duration += d; files += (e.files||0); deleted += (e.deleted||0);
+          if (e.success && (e.finished_at||0) > lastOk) lastOk = e.finished_at || 0;
+          if (!e.success && (e.finished_at||0) > lastFail) lastFail = e.finished_at || 0;
+          const tk = e.task_id || '(未命名任务)';
+          const t = byTask.get(tk) || { task_id: tk, task_name: e.task_name || '', total:0, ok:0, fail:0, bytes:0, duration:0 };
+          t.total++; e.success ? t.ok++ : t.fail++;
+          t.bytes += b; t.duration += d;
+          if (!t.task_name && e.task_name) t.task_name = e.task_name;
+          byTask.set(tk, t);
+          if (!e.success) {
+            const reason = (e.exit_meaning || e.message || '未知原因').slice(0, 60);
+            errCount.set(reason, (errCount.get(reason) || 0) + 1);
+          }
+          const day = new Date(((e.finished_at||0) || 0) * 1000);
+          if (!isNaN(day.getTime())) {
+            const key = `${day.getFullYear()}-${String(day.getMonth()+1).padStart(2,'0')}-${String(day.getDate()).padStart(2,'0')}`;
+            const dd = daily.get(key) || { date: key, total:0, ok:0, fail:0, bytes:0 };
+            dd.total++; e.success ? dd.ok++ : dd.fail++; dd.bytes += b;
+            daily.set(key, dd);
+          }
+        }
+        // 补齐最近 7 天（含 0 的日期，图表才有完整时间轴）
+        const dailyArr = [];
+        for (let i = 6; i >= 0; i--) {
+          const d = new Date((now - i*86400) * 1000);
+          const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+          dailyArr.push(daily.get(key) || { date: key, total:0, ok:0, fail:0, bytes:0 });
+        }
+        const last24 = h.filter(e => (e.finished_at||0) >= now - 86400);
+        send(res,200,{
+          success:true, total, ok, fail:total-ok, partial, bytes, duration,
+          success_rate: total ? Math.round(ok/total*1000)/10 : 0,
+          avg_duration: total ? Math.round(duration/total) : 0,
+          avg_speed: duration ? Math.round(bytes/duration) : 0,
+          avg_bytes: total ? Math.round(bytes/total) : 0,
+          files, deleted, last_ok_at: lastOk, last_fail_at: lastFail,
+          last24h: { total: last24.length, ok: last24.filter(e=>e.success).length,
+                     fail: last24.filter(e=>!e.success).length,
+                     bytes: last24.reduce((a,e)=>a+(e.bytes||0),0) },
+          daily: dailyArr,
+          by_task: [...byTask.values()].sort((a,b)=>b.total-a.total).slice(0,20),
+          top_errors: [...errCount.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([reason,count])=>({ reason, count })),
+        }); return;
       }
       case '/log': {
         const n = parseInt(readQuery(req).lines,10)||200;

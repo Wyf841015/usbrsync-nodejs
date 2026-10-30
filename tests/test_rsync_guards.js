@@ -9,9 +9,78 @@ import {
   parseStats, deleteGuard, isDeviceLost, decodeMountEscapes,
   detectFsFromMounts, sanitizeExclusions, MAX_EXCLUSIONS, MAX_EXCLUSION_LEN,
   buildRsyncCmd, bindHook,
+  parseProgressLine, exitMeaning, extractErrors,
 } from '../ui/rsync.js';
 
-// ── P0-1 删除护栏 ────────────────────────────────────────────────
+// ── 进度行解析（进度条与统计的数据源）──────────────────────────
+test('parseProgressLine：progress2 行拆出字节/百分比/速度/ETA/文件计数', () => {
+  const p = parseProgressLine('     1,234,567  45%    1.23MB/s    0:00:03 (xfr#12, to-chk=345/1234)');
+  assert.equal(p.bytes, 1234567);
+  assert.equal(p.pct, 45);
+  assert.equal(p.speed, '1.23MB/s');
+  assert.equal(p.eta, '0:00:03');
+  assert.equal(p.xfr, 12);
+  assert.equal(p.toChk, 345);
+  assert.equal(p.total, 1234);
+});
+
+test('parseProgressLine：没有 xfr/to-chk 的进度行也能解析', () => {
+  const p = parseProgressLine('    32,768  10%   31.25kB/s    0:01:23');
+  assert.equal(p.bytes, 32768);
+  assert.equal(p.pct, 10);
+  assert.equal(p.eta, '0:01:23');
+  assert.equal(p.xfr, null);
+});
+
+test('parseProgressLine：itemize 行识别为文件、删除行标记 deleted', () => {
+  const f = parseProgressLine('>f+++++++++ photos/2026/a.jpg');
+  assert.equal(f.itemized, true);
+  assert.equal(f.file, 'photos/2026/a.jpg');
+  assert.equal(f.pct, null);
+
+  const d = parseProgressLine('*deleting   old/b.txt');
+  assert.equal(d.deleted, true);
+  assert.equal(d.file, 'old/b.txt');
+});
+
+test('parseProgressLine：错误行不会被当成进度', () => {
+  const e = parseProgressLine('rsync: [sender] change_dir "/mnt/x" failed: No such file or directory (2)');
+  assert.equal(e.pct, null);
+  assert.equal(e.itemized, false);
+  assert.equal(e.deleted, false);
+  assert.match(e.file, /change_dir/);
+  assert.equal(parseProgressLine('').pct, null);
+});
+
+// ── 退出码含义 / 错误提取（历史记录展示用）──────────────────────
+test('exitMeaning：常见退出码给人话', () => {
+  assert.equal(exitMeaning(0), '成功');
+  assert.equal(exitMeaning(23), '部分文件传输失败');
+  assert.equal(exitMeaning(24), '传输中源文件消失（已跳过）');
+  assert.equal(exitMeaning(-1), '进程被中止（超时或强制结束）');
+  assert.equal(exitMeaning(-999), '用户手动停止');
+  assert.match(exitMeaning(99), /未知退出码 99/);
+});
+
+test('extractErrors：挑出错误行，跳过进度行并去重', () => {
+  const out = [
+    '     1,234,567  45%    1.23MB/s    0:00:03',
+    'rsync: [sender] send_files failed to open "/mnt/u/a.jpg": Permission denied (13)',
+    'rsync: [sender] send_files failed to open "/mnt/u/a.jpg": Permission denied (13)',
+    'sent 1,234 bytes  received 56 bytes',
+    '*deleting   old/b.txt',
+  ].join('\n');
+  const errs = extractErrors(out, 5);
+  assert.equal(errs.length, 1, JSON.stringify(errs));
+  assert.match(errs[0], /Permission denied/);
+});
+
+test('extractErrors：空输入返回空数组，limit 生效', () => {
+  assert.deepEqual(extractErrors(''), []);
+  const many = Array.from({ length: 10 }, (_, i) => `rsync: error: failed item ${i}`).join('\n');
+  assert.equal(extractErrors(many, 3).length, 3);
+});
+
 test('删除护栏：没有要删的就放行', () => {
   assert.equal(deleteGuard({ sourceFiles: 0, deletes: 0 }).ok, true);
   assert.equal(deleteGuard({ sourceFiles: 100, deletes: 0 }).ok, true);
