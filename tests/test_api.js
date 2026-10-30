@@ -374,6 +374,40 @@ test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
     assert.equal(row.task_name, '我的备份任务');
   });
 
+  await t.test('auto_sync_check: 逐条给出自动同步的判定原因', async () => {
+    const fs = await import('node:fs');
+    const base = '/tmp/usbrsync-autocheck';
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.mkdirSync(`${base}/src`, { recursive: true });
+    fs.mkdirSync(`${base}/tgt`, { recursive: true });
+    t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+
+    await api('/api/tasks', 'POST', { sync_tasks: [
+      { id: 'ac1', name: '未开自动', source: `${base}/src`, target: `${base}/tgt`, auto_sync_on_insert: false },
+      { id: 'ac2', name: '开了自动但设备没挂', source: `${base}/src`, target: `${base}/tgt`,
+        auto_sync_on_insert: true, device_uuid: 'AAAA-BBBB' },
+      { id: 'ac3', name: '自动但目标不存在', source: `${base}/src`, target: `${base}/no-such`,
+        auto_sync_on_insert: true, device_uuid: 'AAAA-BBBB' },
+    ] });
+
+    const r = await api('/api/auto_sync_check');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.success, true);
+    assert.ok(Array.isArray(r.body.mounts), '应返回当前挂载列表');
+    const byId = Object.fromEntries(r.body.tasks.map((x) => [x.id, x]));
+
+    assert.equal(byId.ac1.auto_sync_on_insert, false);
+    assert.ok(byId.ac1.reasons.some((x) => x.includes('插入后自动同步')), JSON.stringify(byId.ac1));
+    assert.equal(byId.ac1.ok, false);
+
+    assert.ok(byId.ac2.reasons.some((x) => /未挂载|没有挂载中的 USB/.test(x)), JSON.stringify(byId.ac2));
+    assert.equal(byId.ac2.ok, false);
+
+    assert.ok(byId.ac3.reasons.some((x) => x.includes('目标目录不存在')), JSON.stringify(byId.ac3));
+    assert.equal(byId.ac3.ok, false);
+    for (const row of r.body.tasks) assert.ok(Array.isArray(row.reasons));
+  });
+
   await t.test('history clear + stats', async () => {
     await api('/api/history?action=clear', 'POST', {});
     const r = await api('/api/history');

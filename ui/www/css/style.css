@@ -863,6 +863,8 @@ code, .mono { font-family: var(--font-mono); font-size: 0.94em; }
   padding: var(--sp-4);
   background: var(--overlay);
 }
+.modal.show { display: flex; }
+
 .mc {
   width: min(680px, 100%);
   max-height: 88vh;
@@ -1232,3 +1234,60 @@ select.form-control { cursor: pointer; }
   .kpis article, .mc, .toast, .sponsor-modal-content,
   .contact-modal-content { animation: none !important; opacity: 1 !important; transform: none !important; }
 }
+
+/* ── 自动同步检查弹窗 ─────────────────────────────────────────── */
+.ac-hint {
+  padding: 8px 10px;
+  margin-bottom: var(--sp-3);
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+.ac-mount-h { margin: var(--sp-2) 0 6px; font-size: 11px; font-weight: 600; color: var(--text-3); }
+.ac-mounts { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--sp-3); }
+.ac-mount {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--sp-3);
+  padding: 7px 10px;
+  font-size: 11.5px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+.ac-mount b { font-family: var(--font-mono); font-weight: 600; overflow-wrap: anywhere; }
+.ac-mount span { color: var(--text-3); text-align: right; font-variant-numeric: tabular-nums; }
+
+.ac-row {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--bad);
+  border-radius: var(--r);
+}
+.ac-row.ok { border-left-color: var(--ok); }
+.ac-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.ac-head b { font-size: 12.5px; font-weight: 600; }
+.ac-badge {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 7px;
+  font-size: 10.5px; font-weight: 600;
+  color: var(--bad); background: var(--bad-weak); border: 1px solid var(--bad-line);
+  border-radius: var(--r-sm);
+}
+.ac-row.ok .ac-badge { color: var(--ok); background: var(--ok-weak); border-color: var(--ok-line); }
+.ac-flag { font-size: 11px; color: var(--text-3); }
+.ac-line {
+  display: grid;
+  grid-template-columns: 82px 1fr;
+  gap: var(--sp-2);
+  padding: 2px 0;
+  font-size: 11.5px;
+}
+.ac-line > span { color: var(--text-3); }
+.ac-line > b { font-weight: 500; color: var(--text-2); overflow-wrap: anywhere; font-family: var(--font-mono); }
+.ac-reasons { margin: 6px 0 4px; }
+.ac-reason { font-size: 11.5px; color: var(--bad); padding: 1px 0; }
+.ac-reason.ok { color: var(--ok); }

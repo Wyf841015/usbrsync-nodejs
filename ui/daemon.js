@@ -15,7 +15,7 @@
 //   4. 待补同步每轮检查（原来只在插入事件里查）：重启后设备一直挂着也能补做。
 //   5. tick 有超时看门狗：卡住时不会永久占住 running 标志让监控停摆。
 // ═══════════════════════════════════════════════════════════════
-import { collectUsbMounts, mountSignature, diffMounts, pathReady } from './usb.js';
+import { collectUsbMounts, mountSignature, diffMounts, pathReady, relWithin, rebasePath, legacyRelFor } from './usb.js';
 
 const POLL_MS = Number(process.env.USBR_SYNC_POLL_MS || 5000);
 // 挂载出现后先等设备稳定再触发（文件系统刚挂上时可能还在恢复，blkid 也未必就绪）
@@ -88,6 +88,23 @@ export function createDaemon({
   }
 
   // ── 自动同步（插入触发）─────────────────────────────────────
+  // 源路径解析：任务里存的是绝对路径，但同一 U 盘重插后 fnOS 给的挂载目录名可能变
+  // （/vol00/RemovableDisk_1 → /vol00/ProductCode_1），不换算就永远匹配不上 ——
+  // 这是「插入后自动同步无效」的真正原因。
+  function resolveSourceForMount(task, mountPoint) {
+    const within = relWithin(task.source, mountPoint);
+    if (within !== null) return { ok: true, source: rebasePath(mountPoint, within), rel: within };
+    // 优先用保存的相对路径（新任务保存时写入），没有就按「挂载目录改名」推断
+    const stored = typeof task.source_rel === 'string' ? task.source_rel : null;
+    const rel = stored !== null ? stored : legacyRelFor(task.source, mountPoint);
+    if (rel === null || rel === undefined) {
+      return { ok: false, why: `源目录不在本次挂载点内且无法换算（${task.source} vs ${mountPoint}）` };
+    }
+    const cand = rebasePath(mountPoint, rel);
+    if (!pathReady(cand)) return { ok: false, why: `换算后的源目录不存在（${cand}）` };
+    return { ok: true, source: cand, rel, remapped: cand !== task.source };
+  }
+
   async function triggerAutoSync(mountList, mountPoint, firedTaskIds) {
     const tasks = readTasks();
     if (!tasks.sync_tasks?.length) return;
@@ -98,12 +115,28 @@ export function createDaemon({
       if (task.enabled === false) continue;
       if (task.auto_sync_on_insert !== true) continue;
       if (!task.source || !task.target) continue;
-      // UUID 绑定校验（大小写/空白不敏感：vfat UUID 大小写不统一会造成漏触发）
-      if (task.device_uuid && normUuid(mountedUuid) !== normUuid(task.device_uuid)) continue;
-      // 源目录必须在该挂载点内（边界匹配，防 /x/usbA 命中 /x/usbA2）
-      if (!underMount(task.source, mountPoint)) continue;
-
       const key = taskKey(task);
+
+      // UUID 绑定校验（大小写/空白不敏感：vfat UUID 大小写不统一会造成漏触发）
+      if (task.device_uuid && normUuid(mountedUuid) !== normUuid(task.device_uuid)) {
+        // 同一物理盘的其它分区也会走到这里，只有「整台设备都不匹配」才值得记一笔
+        const anyMatch = (mountList || []).some((m) => normUuid(m.uuid) === normUuid(task.device_uuid));
+        if (!anyMatch) {
+          log(`auto sync skipped: ${task.name || key} 本次插入的不是绑定设备（任务 ${task.device_uuid} / 本次 ${mountedUuid || '无 UUID'}）`);
+        }
+        continue;
+      }
+
+      const resolved = resolveSourceForMount(task, mountPoint);
+      if (!resolved.ok) {
+        log(`auto sync skipped: ${task.name || key} ${resolved.why}`);
+        continue;
+      }
+      const effectiveSource = resolved.source;
+      if (resolved.remapped) {
+        log(`auto sync 源路径换算: ${task.source} → ${effectiveSource}（U 盘挂载目录改名了）`);
+      }
+
       if (firedTaskIds.has(key)) continue;                 // 同一轮多分区只触发一次
       firedTaskIds.add(key);
 
@@ -115,12 +148,12 @@ export function createDaemon({
         continue;
       }
       // 路径校验：前缀对 ≠ 目录真的在（挂载成功但子目录被改名/删除怎么办）
-      if (isAllowedPath && !isAllowedPath(task.source)) {
-        log(`auto sync skipped: ${task.name || key} 源路径不在允许范围 (${task.source})`);
+      if (isAllowedPath && !isAllowedPath(effectiveSource)) {
+        log(`auto sync skipped: ${task.name || key} 源路径不在允许范围 (${effectiveSource})`);
         continue;
       }
-      if (!pathReady(task.source)) {
-        log(`auto sync skipped: ${task.name || key} 源目录不存在 (${task.source})`);
+      if (!pathReady(effectiveSource)) {
+        log(`auto sync skipped: ${task.name || key} 源目录不存在 (${effectiveSource})`);
         continue;
       }
       if (!pathReady(task.target)) {
@@ -129,7 +162,7 @@ export function createDaemon({
       }
 
       await fire({
-        source: task.source, target: task.target, bidirectional: !!task.bidirectional,
+        source: effectiveSource, target: task.target, bidirectional: !!task.bidirectional,
         use_delete: !!task.use_delete, task_id: task.id, retry_count: task.retry_count || 0, name: task.name || '',
         retry_delay: task.retry_delay || 5, checksum: !!task.checksum, notify: true,
         keep_history: !!task.keep_history, auto: true,

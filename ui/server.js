@@ -12,11 +12,11 @@ import { fileURLToPath } from 'node:url';
 
 import * as rsync from './rsync.js';
 import { createDaemon } from './daemon.js';
-import { collectUsbMounts } from './usb.js';
+import { collectUsbMounts, relWithin, rebasePath, legacyRelFor } from './usb.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
-const VERSION = '0.4.10';
+const VERSION = '0.4.11';
 
 // ── 数据目录 ───────────────────────────────────────────────────
 const DATA_BASE = process.env.TRM_PKGVAR || '/tmp/usbrsync-nodejs';
@@ -127,6 +127,29 @@ function taskNameOf(taskId) {
 }
 function withTaskNames(list) {
   return (list || []).map((e) => (e && !e.task_name) ? { ...e, task_name: taskNameOf(e.task_id) } : e);
+}
+
+// 保存任务时把「设备内相对路径」一起存下来。
+// 原因：同一 U 盘重插后 fnOS 可能换挂载目录名（/vol00/RemovableDisk_1 →
+// /vol00/ProductCode_1），只存绝对路径会导致插入自动同步永远匹配不上。
+async function attachSourceRel(tasksObj) {
+  let mounts = [];
+  try { mounts = await collectUsbMounts(); } catch { mounts = []; }
+  for (const t of (tasksObj.sync_tasks || [])) {
+    if (!t || !t.source) continue;
+    const uuid = String(t.device_uuid || '').trim().toUpperCase();
+    // 优先用绑定的设备，其次任意包含该路径的挂载点
+    const hit = mounts.find((m) => uuid && String(m.uuid || '').trim().toUpperCase() === uuid
+                                && relWithin(t.source, m.mount_point) !== null)
+             || mounts.find((m) => relWithin(t.source, m.mount_point) !== null);
+    if (!hit) continue;
+    const rel = relWithin(t.source, hit.mount_point);
+    if (rel !== null) {
+      t.source_rel = rel;                 // '' 表示就是挂载根
+      t.source_mount = hit.mount_point;
+    }
+  }
+  return tasksObj;
 }
 
 function saveTasks(o) {
@@ -418,6 +441,7 @@ async function handleApi(pathname, req, res) {
             if (!o.sync_tasks) throw new Error('missing sync_tasks');
             const v = validateTasksPayload(o);
             if (!v.ok) return send(res,400,{ success:false, error:v.error });
+            await attachSourceRel(v.value);
             saveTasks(v.value);
             send(res,200,{success:true});
           }
@@ -496,6 +520,46 @@ async function handleApi(pathname, req, res) {
         const lim = parseInt(q.limit, 10);
         if (Number.isFinite(lim) && lim > 0) h = h.slice(-lim);
         send(res,200,{ success:true, history:h, total:all.length }); return;
+      }
+      case '/auto_sync_check': {
+        // 逐条列出「自动同步」任务的判定链，插入没触发时用来自查
+        let mounts = [];
+        try { mounts = await collectUsbMounts(); } catch (e) { mounts = []; }
+        const tasks = loadTasks().sync_tasks || [];
+        const rows = tasks.map((t) => {
+          const r = {
+            id: t.id, name: t.name || '', source: t.source, target: t.target,
+            enabled: t.enabled !== false, auto_sync_on_insert: t.auto_sync_on_insert === true,
+            device_uuid: t.device_uuid || '', source_rel: (typeof t.source_rel === 'string' ? t.source_rel : null),
+            mount: null, effective_source: t.source, ok: false, reasons: [],
+          };
+          if (!r.enabled) r.reasons.push('任务已禁用');
+          if (!r.auto_sync_on_insert) r.reasons.push('未开启「插入后自动同步」');
+          const uuid = String(t.device_uuid || '').trim().toUpperCase();
+          const m = mounts.find((x) => uuid && String(x.uuid || '').trim().toUpperCase() === uuid)
+                 || mounts.find((x) => relWithin(t.source || '', x.mount_point) !== null);
+          if (!m) {
+            r.reasons.push(uuid ? `设备 ${uuid} 未挂载` : '没有挂载中的 USB 设备包含该源目录');
+          } else {
+            r.mount = { mount_point: m.mount_point, uuid: m.uuid || '', label: m.label || '', fs_type: m.fs_type };
+            // 与 daemon 同样的换算规则
+            const within = relWithin(t.source || '', m.mount_point);
+            const stored = (typeof t.source_rel === 'string') ? t.source_rel : null;
+            const rel = within !== null ? within : (stored !== null ? stored : legacyRelFor(t.source || '', m.mount_point));
+            if (rel === null || rel === undefined) {
+              r.reasons.push(`源目录不在挂载点内且无法换算（${t.source} vs ${m.mount_point}）`);
+            } else {
+              r.effective_source = rebasePath(m.mount_point, rel);
+              r.mount_renamed = r.effective_source !== t.source;
+            }
+          }
+          if (!existsSync(t.target || '')) r.reasons.push(`目标目录不存在：${t.target}`);
+          else if (r.effective_source && !existsSync(r.effective_source)) r.reasons.push(`源目录不存在：${r.effective_source}`);
+          r.ok = r.enabled && r.auto_sync_on_insert && !!r.mount && r.reasons.length === 0;
+          return r;
+        });
+        send(res,200,{ success:true, mounts: mounts.map((m)=>({ mount_point:m.mount_point, uuid:m.uuid||'', label:m.label||'', fs_type:m.fs_type })), tasks:rows });
+        return;
       }
       case '/stats': {
         const h = withTaskNames(loadHistory());

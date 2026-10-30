@@ -206,6 +206,45 @@ export function diffMounts(prevSig, curSig, curList) {
   };
 }
 
+// ── 挂载点改名后的路径换算 ──────────────────────────────────────
+// fnOS 重新插入同一个 U 盘时挂载目录名会变：
+//   第一次 /vol00/RemovableDisk_1 → 第二次 /vol00/ProductCode_1
+// 任务里存的 source 是绝对路径，不换算就永远匹配不上（表现为「插入后不自动同步」）。
+export function relWithin(p, mountPoint) {
+  let path = String(p || '');
+  const mp = String(mountPoint || '').replace(/\/+$/, '');
+  if (path.length > 1) path = path.replace(/\/+$/, '');   // 末尾多斜杠不该算成子目录
+  if (!path || !mp) return null;
+  if (path === mp) return '';
+  if (path.startsWith(mp + '/')) return path.slice(mp.length);
+  return null;
+}
+
+export function rebasePath(mountPoint, rel) {
+  const mp = String(mountPoint || '').replace(/\/+$/, '');
+  const r = String(rel || '');
+  if (!mp) return '';
+  return r && r !== '/' ? `${mp}${r.startsWith('/') ? '' : '/'}${r}` : mp;
+}
+
+// 老任务（没存 source_rel）换算：假定挂载点父目录相同、第一段是旧挂载目录名
+//   oldSource=/vol00/RemovableDisk_1/DCIM, newMount=/vol00/ProductCode_1 → '/DCIM'
+//   oldSource=/vol00/RemovableDisk_1,          newMount=/vol00/ProductCode_1 → ''
+export function legacyRelFor(oldSource, newMountPoint) {
+  const old = String(oldSource || '');
+  const mp = String(newMountPoint || '').replace(/\/+$/, '');
+  if (!old || !mp) return null;
+  const oldSegs = old.split('/').filter(Boolean);
+  const newSegs = mp.split('/').filter(Boolean);
+  if (!oldSegs.length || !newSegs.length) return null;
+  if (oldSegs[0] !== newSegs[0]) return null;          // 不同顶层目录（/vol00 vs /mnt）不猜
+  if (oldSegs.length < newSegs.length) return null;    // 比挂载点还浅，不可能在其内
+  // 假定旧挂载目录与新挂载目录层级相同（都是 /vol00/<名字>）：
+  // 去掉「父目录 + 旧挂载名」这两段，剩下的就是设备内相对路径
+  const rest = oldSegs.slice(newSegs.length);
+  return rest.length ? '/' + rest.join('/') : '';
+}
+
 // 待补同步就绪判断：路径必须真实可见（USB 拔掉后其挂载点与内容会消失）
 export function pathReady(p) {
   if (!p) return false;

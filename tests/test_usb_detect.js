@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import {
   flattenLsblk, isUsbNode, mountSignature, diffMounts, fixEncoding,
   unescapeMountPoint, isRemovableBySysfs, collectUsbMounts, pathReady,
+  relWithin, rebasePath, legacyRelFor,
 } from '../ui/usb.js';
 
 // ── 夹具：本机真实结构（SATA + RAID + LVM + btrfs /volN）────────
@@ -232,4 +233,27 @@ test('pathReady：不存在路径不算就绪', () => {
     assert.equal(pathReady(join(dir, 'missing-subdir')), false);
     assert.equal(pathReady(''), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── 挂载点改名换算（现场问题：U 盘重插后挂载目录名变了）──────────
+test('relWithin：根 / 子目录 / 外部三种情况', () => {
+  assert.equal(relWithin('/vol00/RemovableDisk_1', '/vol00/RemovableDisk_1'), '');
+  assert.equal(relWithin('/vol00/RemovableDisk_1/DCIM', '/vol00/RemovableDisk_1'), '/DCIM');
+  assert.equal(relWithin('/vol00/Other', '/vol00/RemovableDisk_1'), null);
+  assert.equal(relWithin('/vol00/RemovableDisk_10', '/vol00/RemovableDisk_1'), null, '不能前缀误命中');
+  assert.equal(relWithin('/vol00/X/', '/vol00/X'), '');
+});
+
+test('rebasePath：拼回绝对路径', () => {
+  assert.equal(rebasePath('/vol00/ProductCode_1', ''), '/vol00/ProductCode_1');
+  assert.equal(rebasePath('/vol00/ProductCode_1', '/'), '/vol00/ProductCode_1');
+  assert.equal(rebasePath('/vol00/ProductCode_1', '/DCIM'), '/vol00/ProductCode_1/DCIM');
+  assert.equal(rebasePath('/vol00/ProductCode_1/', 'DCIM'), '/vol00/ProductCode_1/DCIM');
+});
+
+test('legacyRelFor：按挂载目录改名推断设备内相对路径', () => {
+  assert.equal(legacyRelFor('/vol00/RemovableDisk_1', '/vol00/ProductCode_1'), '');
+  assert.equal(legacyRelFor('/vol00/RemovableDisk_1/DCIM/2026', '/vol00/ProductCode_1'), '/DCIM/2026');
+  assert.equal(legacyRelFor('/mnt/usbA/x', '/vol00/ProductCode_1'), null, '不同顶层目录不猜');
+  assert.equal(legacyRelFor('/vol00', '/vol00/ProductCode_1'), null, '比挂载点还浅不猜');
 });

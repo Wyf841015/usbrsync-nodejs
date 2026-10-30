@@ -283,3 +283,74 @@ test('tick 卡死有看门狗：监控继续跑下一轮', async () => {
   assert.ok(scanCalls >= 3, `看门狗应让 loop 继续（实际 scanUsb 调用 ${scanCalls} 次）`);
   assert.ok(logs.some((l) => /超时/.test(l)), '应记录超时告警');
 });
+
+// ══ 挂载点改名（/vol00/RemovableDisk_1 → /vol00/ProductCode_1）════
+// 现场问题：任务存的是绝对路径，U 盘重插后 fnOS 换了挂载目录名，
+// 原来的 underMount 前缀匹配永远失败 → 表现为「插入后自动同步无效」。
+function renamedDirs() {
+  const base = mkdtempSync(join(tmpdir(), 'usbr-ren-'));
+  const oldRoot = join(base, 'RemovableDisk_1');
+  const newRoot = join(base, 'ProductCode_1');
+  const tgt = join(base, 'tgt');
+  mkdirSync(oldRoot);                    // 旧挂载留下的空目录（拔盘后仍在）
+  mkdirSync(join(newRoot, 'DCIM'), { recursive: true });   // 新挂载里的真实内容
+  mkdirSync(tgt);
+  return { base, oldRoot, newRoot, tgt, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+}
+
+test('挂载点改名：老任务（只存绝对路径）也能触发，并把源路径换算到新挂载点', async () => {
+  const d = renamedDirs();
+  try {
+    const task = { id: 't-rename', name: '手机备份', enabled: true, auto_sync_on_insert: true,
+                   source: d.oldRoot, target: d.tgt, device_uuid: UUID, retry_count: 0 };
+    const h = harness({ tasks: [task] });
+    await h.daemon._tick();                       // 启动时无设备
+    h.setMount(d.newRoot);                        // 插入后挂在新的目录名上
+    await h.daemon._tick();
+    assert.equal(h.calls.length, 1, '应触发一次同步');
+    assert.equal(h.calls[0].source, d.newRoot, '源路径应换算到新挂载点');
+    assert.ok(h.logHas(/源路径换算/), '应记录换算日志');
+  } finally { d.cleanup(); }
+});
+
+test('挂载点改名：存了 source_rel 的任务按相对路径还原（子目录场景）', async () => {
+  const d = renamedDirs();
+  try {
+    const task = { id: 't-rel', name: 'DCIM 备份', enabled: true, auto_sync_on_insert: true,
+                   source: d.oldRoot + '/DCIM', target: d.tgt, device_uuid: UUID,
+                   source_rel: '/DCIM', retry_count: 0 };
+    const h = harness({ tasks: [task] });
+    await h.daemon._tick();
+    h.setMount(d.newRoot);
+    await h.daemon._tick();
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].source, join(d.newRoot, 'DCIM'));
+  } finally { d.cleanup(); }
+});
+
+test('挂载点改名：换算后目录不存在就不硬跑，并说明原因', async () => {
+  const d = renamedDirs();
+  try {
+    const task = { id: 't-miss', name: '不存在的子目录', enabled: true, auto_sync_on_insert: true,
+                   source: d.oldRoot + '/NoSuchDir', target: d.tgt, device_uuid: UUID, retry_count: 0 };
+    const h = harness({ tasks: [task] });
+    await h.daemon._tick();
+    h.setMount(d.newRoot);
+    await h.daemon._tick();
+    assert.equal(h.calls.length, 0, '不应触发');
+    assert.ok(h.logHas(/换算后的源目录不存在|源目录不存在/), '应说明原因');
+  } finally { d.cleanup(); }
+});
+
+test('绑定设备不匹配时记日志（不再静默跳过）', async () => {
+  const d = tmpDirs();
+  try {
+    const other = 'AAA-BBBB';
+    const h = harness({ tasks: [taskWith(d.src, d.tgt)] });   // 任务绑定 UUID
+    await h.daemon._tick();
+    h.setMount(d.base, other);                                // 插入的是别的盘
+    await h.daemon._tick();
+    assert.equal(h.calls.length, 0);
+    assert.ok(h.logHas(/不是绑定设备/), '应记录设备不匹配的原因');
+  } finally { d.cleanup(); }
+});

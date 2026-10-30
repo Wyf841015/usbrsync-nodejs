@@ -319,4 +319,42 @@ function copyQQNumber(){
 }
 function showSponsorModal(){const o=document.getElementById('sponsorModal');if(o)o.classList.add('show')}
 function showSponsorImgFull(img){const o=document.getElementById('sponsorImgOverlay');if(o){o.classList.add('show');document.getElementById('sponsorImgFull').src=img.src}}
+// ── 自动同步检查（诊断「插入后没自动同步」）─────────────────────
+async function showAutoSyncCheck(){
+  const modal=$('autosync-modal'); if(!modal) return;
+  modal.classList.add('show');
+  $('ac-mounts').innerHTML='<div class="nd">检查中…</div>';
+  $('ac-tasks').innerHTML='';
+  const r=await api('/api/auto_sync_check');
+  if(r.success===false){
+    $('ac-mounts').innerHTML=`<div class="nd danger">检查失败：${esc(r.error||'接口错误')}</div>`;
+    return;
+  }
+  const mounts=r.mounts||[];
+  $('ac-mounts').innerHTML = mounts.length
+    ? `<div class="ac-mount-h">当前挂载的 USB 设备</div>` + mounts.map(m=>
+        `<div class="ac-mount"><b>${esc(m.mount_point)}</b><span>${esc(m.label||'无卷标')} · ${esc(m.fs_type||'-')} · UUID ${esc(m.uuid||'未知')}</span></div>`).join('')
+    : '<div class="nd">当前没有挂载中的 USB 设备</div>';
+
+  const rows=r.tasks||[];
+  if(!rows.length){ $('ac-tasks').innerHTML='<div class="nd">还没有同步任务</div>'; return; }
+  $('ac-tasks').innerHTML=rows.map(t=>`
+    <div class="ac-row ${t.ok?'ok':'bad'}">
+      <div class="ac-head">
+        <span class="ac-badge">${t.ok?'会触发':'不会触发'}</span>
+        <b>${esc(t.name||t.id)}</b>
+        <span class="ac-flag">${t.auto_sync_on_insert?'已开「插入自动同步」':'未开「插入自动同步」'}</span>
+      </div>
+      <div class="ac-line"><span>源目录</span><b>${esc(t.source||'-')}</b></div>
+      ${t.mount?`<div class="ac-line"><span>匹配挂载点</span><b>${esc(t.mount.mount_point)} · ${esc(t.mount.label||'无卷标')} · UUID ${esc(t.mount.uuid||'未知')}</b></div>`
+               :`<div class="ac-line"><span>匹配挂载点</span><b class="danger">未找到（任务绑定设备：${esc(t.device_uuid||'未绑定')}）</b></div>`}
+      ${t.effective_source && t.effective_source!==t.source
+        ? `<div class="ac-line"><span>换算后源目录</span><b>${esc(t.effective_source)}</b></div>
+           <div class="ac-line"><span>说明</span><b>U 盘挂载目录改名了，会自动换算（设备内相对路径 ${esc(t.source_rel===null?'（未记录，按挂载名推断）':(t.source_rel===''?'根目录':t.source_rel))}）</b></div>`:''}
+      ${t.reasons&&t.reasons.length?`<div class="ac-reasons">${t.reasons.map(x=>`<div class="ac-reason">· ${esc(x)}</div>`).join('')}</div>`:'<div class="ac-reasons"><div class="ac-reason ok">条件全部满足：插入该设备后会自动开始同步</div></div>'}
+      <div class="ac-line"><span>目标目录</span><b>${esc(t.target||'-')}</b></div>
+    </div>`).join('');
+}
+function closeAutoSyncCheck(){const m=$('autosync-modal');if(m)m.classList.remove('show')}
+
 window.onload=async function(){initTheme();await loadAll();const dv=document.getElementById('f-device');if(dv)dv.addEventListener('change',onDeviceBindingChange);window._lastHistRefresh=Date.now();startSyncMonitor()};
