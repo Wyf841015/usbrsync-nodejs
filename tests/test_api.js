@@ -211,6 +211,77 @@ test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
     assert.strictEqual(free.body.root, null);
   });
 
+  // ── 接口面加固（P1-2/P1-3/P1-7/P2-1/P2-8）──────────────────
+  await t.test('sync_stop / preview / config_import 必须是 POST', async () => {
+    for (const p of ['/api/sync_stop', '/api/preview', '/api/config_import']) {
+      const r = await api(p, 'GET');
+      assert.equal(r.status, 405, `${p} GET 应返回 405，实际 ${r.status}`);
+    }
+  });
+
+  await t.test('save_file: 忽略客户端传入内容，写服务端真实日志', async () => {
+    const fs = await import('node:fs');
+    const dir = '/tmp/usbrsync-savefile';
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir, { recursive: true });
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    const r = await api('/api/save_file', 'POST', { dir, kind: 'log', content: 'HACKED-CONTENT' });
+    assert.equal(r.body.success, true, JSON.stringify(r.body));
+    const written = fs.readFileSync(`${dir}/usbrsync.log`, 'utf8');
+    assert.ok(!written.includes('HACKED-CONTENT'), '客户端内容不应写入文件');
+
+    const c = await api('/api/save_file', 'POST', { dir, kind: 'config' });
+    assert.equal(c.body.success, true);
+    const cfg = JSON.parse(fs.readFileSync(`${dir}/usbrsync-config.json`, 'utf8'));
+    assert.ok(Array.isArray(cfg.sync_tasks));
+  });
+
+  await t.test('tasks POST: 结构非法被拒绝（400）', async () => {
+    const bad1 = await api('/api/tasks', 'POST', { sync_tasks: 'not-an-array' });
+    assert.equal(bad1.status, 400);
+    const bad2 = await api('/api/tasks', 'POST', { sync_tasks: [{ source: 123 }] });
+    assert.equal(bad2.status, 400);
+    const bad3 = await api('/api/tasks', 'POST', { sync_tasks: Array.from({ length: 201 }, () => ({})) });
+    assert.equal(bad3.status, 400);
+    const ok = await api('/api/tasks', 'POST', { sync_tasks: [{ id: 'x1', name: 'n', source: '/tmp/a', target: '/tmp/b' }] });
+    assert.equal(ok.body.success, true, JSON.stringify(ok.body));
+  });
+
+  await t.test('log / drives 只读端点正常', async () => {
+    const log = await api('/api/log?lines=10');
+    assert.equal(log.status, 200);
+    assert.equal(log.body.success, true);
+    const drives = await api('/api/drives');
+    assert.equal(drives.status, 200);
+    assert.ok(Array.isArray(drives.body.drives));
+  });
+
+  await t.test('静态文件：路径穿越被拒', async () => {
+    for (const path of ['/app/usbrsync/..%2f..%2fserver.js', '/app/usbrsync/%2e%2e/server.js']) {
+      const r = await fetch(`${BASE}${path}`);
+      assert.ok([403, 404].includes(r.status), `${path} 应被拒，实际 ${r.status}`);
+      const body = await r.text();
+      assert.ok(!body.includes('createServer'), '不得泄露后端源码');
+    }
+  });
+
+  await t.test('PORT 模式：跨源 POST 被拒（CSRF 防护）', async () => {
+    const r = await fetch(`${BASE}/api/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example.com' },
+      body: JSON.stringify({ sync_tasks: [] }),
+    });
+    assert.equal(r.status, 403, '跨源写请求应 403');
+    // 无 Origin（curl/服务端调用）仍放行
+    const ok = await fetch(`${BASE}/api/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sync_tasks: [] }),
+    });
+    assert.equal(ok.status, 200);
+  });
+
   await t.test('history clear + stats', async () => {
     await api('/api/history?action=clear', 'POST', {});
     const r = await api('/api/history');

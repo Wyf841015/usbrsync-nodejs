@@ -46,9 +46,24 @@ const DEFAULT_EXCLUSIONS = ['*.tmp','*.temp','~*','.DS_Store','Thumbs.db','Syste
 const ALLOWED_PATH_PREFIXES = ['/vol','/mnt','/media','/tmp'];
 
 // ── 工具 ───────────────────────────────────────────────────────
+// 应用日志轮转：每 200 条检查一次体积，超过 5MB 滚到 .1.bak。
+// 原来只有 sync.log 有轮转，usbrsync.log 会无限增长（/vol3 被日志占满是真实事故）。
+let _logWrites = 0;
+function rotateAppLog() {
+  try {
+    if (statSync(APP_LOG).size > 5 * 1024 * 1024) {
+      const b = APP_LOG + '.1.bak';
+      if (existsSync(b)) unlinkSync(b);
+      renameSync(APP_LOG, b);
+    }
+  } catch {}
+}
 function log(msg) {
   const line = `${new Date().toISOString().replace('T',' ').slice(0,19)} - ${msg}\n`;
-  try { writeFileSync(APP_LOG, line, {flag:'a'}); } catch {}
+  try {
+    writeFileSync(APP_LOG, line, {flag:'a'});
+    if (++_logWrites % 200 === 0) rotateAppLog();
+  } catch {}
 }
 // 状态写盘节流: 进度刷新高频(每秒多次), 300ms 合并写, 原子替换防撕裂
 let _statusTimer = null;
@@ -97,6 +112,45 @@ function saveTasks(o) {
   // 唯一临时名防并发覆盖 (history clear 与 appendHistory 可能并发)
   const t = `${TASKS_FILE}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(t, JSON.stringify(o,null,2)); renameSync(t,TASKS_FILE);
+}
+
+// ── 任务配置校验（/tasks 与 /config_import 共用）────────────────
+// 原来把 POST 的 JSON 直接落盘：任意结构、任意长度都能写进去，
+// 之后 daemon/rsync 拿着脏字段去找路径。这里做一次结构与长度收敛。
+const MAX_TASKS = 200;
+const MAX_TASK_STR = 4096;
+const MAX_EXCLUSIONS = rsync.MAX_EXCLUSIONS;
+function validateTasksPayload(o) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return { ok:false, error:'配置必须是对象' };
+  const tasks = o.sync_tasks;
+  if (!Array.isArray(tasks)) return { ok:false, error:'sync_tasks 必须是数组' };
+  if (tasks.length > MAX_TASKS) return { ok:false, error:`任务数量超过上限 ${MAX_TASKS}` };
+  const cleanStr = (v) => {
+    if (v === undefined || v === null) return '';
+    if (typeof v !== 'string') return null;
+    if (v.length > MAX_TASK_STR) return null;
+    if (v.includes('\u0000')) return null;
+    return v;
+  };
+  const out = [];
+  for (let i = 0; i < tasks.length; i++) {
+    const t = tasks[i];
+    if (!t || typeof t !== 'object' || Array.isArray(t)) return { ok:false, error:`第 ${i+1} 个任务不是对象` };
+    const name = cleanStr(t.name), source = cleanStr(t.source), target = cleanStr(t.target), id = cleanStr(t.id);
+    if (name === null || source === null || target === null || id === null)
+      return { ok:false, error:`第 ${i+1} 个任务的字段类型或长度不合法` };
+    const excl = Array.isArray(t.task_exclusions) ? t.task_exclusions : [];
+    if (excl.length > MAX_EXCLUSIONS) return { ok:false, error:`第 ${i+1} 个任务的排除规则超过 ${MAX_EXCLUSIONS} 条` };
+    out.push({
+      ...t,
+      id: id || `task_${Date.now()}_${i}`,
+      name: name.slice(0, 200),
+      source, target,
+      task_exclusions: excl.filter((x) => typeof x === 'string' && x.length <= 512 && x.length > 0),
+    });
+  }
+  const globalExcl = Array.isArray(o.exclusions) ? o.exclusions : [];
+  return { ok:true, value: { ...o, sync_tasks: out, exclusions: globalExcl.filter((x) => typeof x === 'string' && x.length <= 512 && x.length > 0) } };
 }
 function excluder(taskId) {
   const { sync_tasks=[], exclusions=[] } = loadTasks();
@@ -331,8 +385,14 @@ async function handleApi(pathname, req, res) {
         send(res,200,{ success:true, drives:readDriveList() }); return;
       case '/tasks': {
         if (method === 'POST') {
-          try { const o=JSON.parse(body||'{}'); if (!o.sync_tasks) throw new Error('missing sync_tasks');
-            saveTasks(o); send(res,200,{success:true}); }
+          try {
+            const o = JSON.parse(body||'{}');
+            if (!o.sync_tasks) throw new Error('missing sync_tasks');
+            const v = validateTasksPayload(o);
+            if (!v.ok) return send(res,400,{ success:false, error:v.error });
+            saveTasks(v.value);
+            send(res,200,{success:true});
+          }
           catch(e){ send(res,400,{success:false,error:'empty body or invalid'}); }
         } else {
           send(res,200,{ success:true, tasks:loadTasks() });
@@ -351,6 +411,7 @@ async function handleApi(pathname, req, res) {
         return send(res,200,{ success:false, error:(r && r.message) || '同步未能开始', result:r });
       }
       case '/preview': {
+        if (method !== 'POST') return send(res,405,{success:false,error:'POST required'});
         let p; try { p=JSON.parse(body||'{}'); } catch { p={}; }
         if (!p.source || !p.target) return send(res,200,{success:false,error:'source/target required'});
         if (!isAllowedPath(p.source) || !isAllowedPath(p.target)) return send(res,200,{success:false,error:'path not allowed'});
@@ -371,6 +432,8 @@ async function handleApi(pathname, req, res) {
         return;
       }
       case '/sync_stop':
+        // 状态变更必须 POST：GET 会被 <img src> 之类的跨站请求触发（CSRF）
+        if (method !== 'POST') return send(res,405,{success:false,error:'POST required'});
         stopSync(); send(res,200,{success:true}); return;
       case '/sync_status':
         send(res,200,{ success:true, sync:syncState }); return;
@@ -454,8 +517,10 @@ async function handleApi(pathname, req, res) {
           // 文件名固定, 不接受外部传入, 防目录穿越
           const fname = kind==='log' ? 'usbrsync.log' : 'usbrsync-config.json';
           const target = join(dir, fname);
+          // 内容一律由服务端自己取：原来 kind='log' 写的是客户端传来的 o.content，
+          // 等于把「导出日志」变成「向任意允许目录写任意文本」的写原语。
           const content = kind==='log'
-            ? String(o.content||'')
+            ? readSyncLog(5000).join('\n')
             : JSON.stringify(loadTasks(), null, 2);
           writeFileSync(target, content, 'utf8');
           send(res,200,{success:true, path:target, size:Buffer.byteLength(content,'utf8')});
@@ -463,8 +528,14 @@ async function handleApi(pathname, req, res) {
         return;
       }
       case '/config_import': {
-        try { const o=JSON.parse(body||'{}'); if (!o.sync_tasks) throw new Error('invalid');
-          saveTasks(o); send(res,200,{success:true}); }
+        if (method !== 'POST') return send(res,405,{success:false,error:'POST required'});
+        try {
+          const o=JSON.parse(body||'{}');
+          if (!o.sync_tasks) throw new Error('invalid');
+          const v = validateTasksPayload(o);
+          if (!v.ok) return send(res,200,{ success:false, error:`配置校验失败：${v.error}` });
+          saveTasks(v.value); send(res,200,{success:true});
+        }
         catch(e){ send(res,200,{success:false,error:'invalid config'}); }
         return;
       }
@@ -576,6 +647,15 @@ const server = createServer(async (req, res) => {
 
 // ── 启动 ───────────────────────────────────────────────────────
 function start() {
+  // 上次异常退出可能把 sync_status.json 留在 syncing，界面会一直显示「同步中」
+  try {
+    const st = JSON.parse(readFileSync(STATUS_FILE, 'utf8'));
+    if (st && st.status === 'syncing') {
+      log('启动复位：上次退出时同步状态为 syncing，已重置为空闲');
+      setSyncStatus('idle', 0, '', '上次同步被中断（进程重启）', '', 0);
+    }
+  } catch {}
+
   // 启动 daemon
   const daemon = createDaemon({ loadTasks, isAllowedPath, requestSync, log, loadPending, removePending });
   daemon.start();
@@ -586,7 +666,8 @@ function start() {
 
   return new Promise((res, rej) => {
     if (PORT_MODE) {
-      server.listen(PORT_MODE, () => {
+      // 只绑回环：PORT 模式没有网关鉴权，绑 0.0.0.0 等于把全部 API 暴露到局域网
+      server.listen(PORT_MODE, '127.0.0.1', () => {
         log(`usbrsync listening on http://127.0.0.1:${PORT_MODE}`);
         debug(`listening on :${PORT_MODE}`);
         res(server.address());
@@ -612,6 +693,11 @@ process.on('unhandledRejection', (reason) => {
 });
 process.on('uncaughtException', (err) => {
   try { log(`uncaughtException: ${err?.stack||err}`); } catch {}
+  // 不要让异常把 running 卡住：否则之后所有同步都返回「已有同步正在运行」
+  try {
+    if (running) running = null;
+    setSyncStatus('error', 0, '', '进程异常，已重置同步状态', '', 0);
+  } catch {}
 });
 
 // 启动 (cmd/main 调用)
