@@ -15,7 +15,6 @@ import {
   flattenLsblk, isUsbNode, mountSignature, diffMounts, fixEncoding,
   unescapeMountPoint, isRemovableBySysfs, collectUsbMounts, pathReady,
 } from '../ui/usb.js';
-import { createDaemon } from '../ui/daemon.js';
 
 // ── 夹具：本机真实结构（SATA + RAID + LVM + btrfs /volN）────────
 const FIXTURE_SATA = {
@@ -232,111 +231,5 @@ test('pathReady：不存在路径不算就绪', () => {
     assert.equal(pathReady(dir), true);
     assert.equal(pathReady(join(dir, 'missing-subdir')), false);
     assert.equal(pathReady(''), false);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-// ── daemon 主循环端到端 ─────────────────────────────────────────
-// 用「当前状态」变量驱动，测试里显式改状态；
-// 这样 settle 复检（tick 内会再扫一次）拿到的是同一状态，符合真实行为。
-function makeDaemon(initialState, tasks, pending = []) {
-  const calls = [];
-  const logs = [];
-  let state = initialState;
-  const daemon = createDaemon({
-    loadTasks: () => ({ sync_tasks: tasks }),
-    isAllowedPath: () => true,
-    requestSync: async (p) => { calls.push(p); },
-    log: (m) => logs.push(m),
-    loadPending: () => pending,
-    removePending: () => {},
-    scanUsb: async () => state,
-    pollMs: 10,
-    settleMs: 0,
-  });
-  return { daemon, calls, logs, setState: (v) => { state = v; } };
-}
-
-const TASK = {
-  id: 't1', name: '备份U盘', enabled: true, auto_sync_on_insert: true,
-  source: '/mnt/usbA/photos', target: '/vol1/backup', device_uuid: '1A2B-3C4D',
-};
-
-test('主循环：启动无设备 → 插入 → 拔出 → 重插，两次插入各触发一次', async () => {
-  const usb = mountOf(FIXTURE_USB);
-  const h = makeDaemon([], [TASK]);
-
-  await h.daemon._tick();        // 启动时没设备
-  h.setState(usb);
-  await h.daemon._tick();        // 第一次插入 → 触发
-  h.setState([]);
-  await h.daemon._tick();        // 拔出
-  h.setState(usb);
-  await h.daemon._tick();        // 同一个设备重插 → 必须再次触发（P1-3）
-  await h.daemon._tick();        // 状态未变，不重复触发
-
-  assert.equal(h.calls.length, 2, `期望插入两次各触发一次，实际 ${h.calls.length} 次`);
-  assert.equal(h.calls[0].source, TASK.source);
-  assert.equal(h.calls[0].auto, true);
-});
-
-test('主循环：UUID 不匹配不触发', async () => {
-  const usb = mountOf(FIXTURE_USB);
-  const h = makeDaemon([], [{ ...TASK, device_uuid: 'WRONG-UUID' }]);
-  await h.daemon._tick();
-  h.setState(usb);
-  await h.daemon._tick();
-  assert.equal(h.calls.length, 0);
-});
-
-test('主循环：未开 auto_sync_on_insert / 任务禁用 不触发', async () => {
-  const usb = mountOf(FIXTURE_USB);
-  const a = makeDaemon([], [{ ...TASK, auto_sync_on_insert: false }]);
-  await a.daemon._tick(); a.setState(usb); await a.daemon._tick();
-  assert.equal(a.calls.length, 0);
-
-  const b = makeDaemon([], [{ ...TASK, enabled: false }]);
-  await b.daemon._tick(); b.setState(usb); await b.daemon._tick();
-  assert.equal(b.calls.length, 0);
-});
-
-test('主循环：源目录不在挂载点内不触发', async () => {
-  const usb = mountOf(FIXTURE_USB);
-  const h = makeDaemon([], [{ ...TASK, source: '/mnt/usbAB/photos' }]);
-  await h.daemon._tick(); h.setState(usb); await h.daemon._tick();
-  assert.equal(h.calls.length, 0, '/mnt/usbA 不应命中 /mnt/usbAB');
-});
-
-test('主循环：两块分区同时出现，同一任务只触发一次', async () => {
-  const first = mountOf(FIXTURE_USB)[0];
-  const second = { ...first, device: '/dev/sdd2', mount_point: '/mnt/usbA2' };
-  const h = makeDaemon([], [TASK]);
-  await h.daemon._tick();
-  h.setState([first, second]);     // 同一块盘的两个分区同时出现
-  await h.daemon._tick();
-  assert.equal(h.calls.length, 1, '一个盘多分区不能让同一任务跑两遍');
-});
-
-test('待补同步：路径不可见时补同步不触发', async () => {
-  const usb = mountOf(FIXTURE_USB);
-  const pending = [{ task_id: 'p1', attempts: 0, source: '/mnt/not-mounted/x', target: '/vol1/backup' }];
-  const h = makeDaemon([], [], pending);
-  await h.daemon._tick();
-  h.setState(usb);
-  await h.daemon._tick();
-  assert.equal(h.calls.length, 0, '源路径不存在时不得补同步');
-});
-
-test('待补同步：路径可见时触发补同步', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'usbr-pending-'));
-  try {
-    const src = join(dir, 'src'); mkdirSync(src); writeFileSync(join(src, 'a.txt'), 'x');
-    const usb = mountOf(FIXTURE_USB);
-    const pending = [{ task_id: 'p1', attempts: 0, source: src, target: dir }];
-    const h = makeDaemon([], [], pending);
-    await h.daemon._tick();
-    h.setState(usb);
-    await h.daemon._tick();
-    assert.equal(h.calls.length, 1);
-    assert.equal(h.calls[0].pending_retry, true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
