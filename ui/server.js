@@ -16,7 +16,7 @@ import { collectUsbMounts } from './usb.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
-const VERSION = '0.4.5';
+const VERSION = '0.4.6';
 
 // ── 数据目录 ───────────────────────────────────────────────────
 const DATA_BASE = process.env.TRM_PKGVAR || '/tmp/usbrsync-nodejs';

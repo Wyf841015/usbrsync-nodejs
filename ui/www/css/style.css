@@ -789,14 +789,6 @@ select.form-control { cursor: pointer; }
 }
 .browse-item:hover { background: var(--brand-weak); color: var(--brand-text); }
 .browse-item > span:first-of-type { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-/* 设备列表的第二行：挂载点 + 容量，弱化处理 */
-.browse-sub {
-  flex: 0 0 auto;
-  margin-left: 10px;
-  font-size: 11px;
-  color: var(--text-3);
-  font-family: var(--font-mono);
-}
 
 .browse-item:last-child { border-bottom: 0; }
 

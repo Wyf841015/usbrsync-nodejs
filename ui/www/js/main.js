@@ -45,62 +45,43 @@ function encPath(p){return encodeURIComponent(p)}
 
 function openBrowse(field){
   browseMode='field'; browseField=field; browseRoot='';
-  browseUsbOnly = (field==='source');
+  // 只有「源目录 + 已绑定具体设备」才锁范围；选「任意设备」时可浏览所有目录
+  const boundDev = field==='source' ? deviceByUuid($('f-device').value) : null;
+  browseUsbOnly = !!boundDev;
   $('browse-confirm').disabled = false;
-  $('browse-title').textContent = browseUsbOnly ? '选择 USB 源目录' : '选择目标目录';
   $('browse-confirm').textContent = '选择当前目录';
+  $('browse-title').textContent = field!=='source' ? '选择目标目录'
+    : (boundDev ? `选择 ${boundDev.label||boundDev.name||'USB'} 内的源目录` : '选择源目录（任意设备）');
   $('browse-modal').style.display='flex';
-  if (browseUsbOnly) return openUsbRoots();       // 源目录：只能看 USB
-  currentPath = $('f-'+field).value || '/vol1';
-  loadBrowse(encPath(currentPath));
-}
-
-// 源目录第一层：只列 USB 设备挂载点
-function openUsbRoots(){
-  browseRoot=''; currentPath='';
-  if (!devices.length){
-    $('browse-path').textContent = '未检测到 USB 设备';
-    $('browse-confirm').disabled = true;
-    $('browse-list').innerHTML = '<div class="nd">请先插入并挂载 USB 设备</div>';
-    return;
-  }
-  const dev = deviceByUuid($('f-device').value);
-  if (dev){                                        // 已绑定设备：直接进它，出不去
-    browseRoot = dev.mount_point;
+  if (browseUsbOnly){                              // 绑定设备：锁在该设备内
+    browseRoot = boundDev.mount_point;
     const cur = $('f-source').value || '';
     const start = (cur===browseRoot || cur.startsWith(browseRoot+'/')) ? cur : browseRoot;
-    $('browse-confirm').disabled = false;
     return loadBrowse(encPath(start), encPath(browseRoot));
   }
-  $('browse-path').textContent = 'USB 设备';
-  $('browse-confirm').disabled = true;             // 设备列表本身不是可选目录
-  $('browse-list').innerHTML = devices.map(d=>
-    `<button class="browse-item" onclick="enterUsbDevice('${encPath(d.mount_point)}')">`
-    + FOLDER_SVG
-    + `<span>${esc(d.label||d.name||d.mount_point)}</span>`
-    + `<span class="browse-sub">${esc(d.mount_point)} · ${size(d.size)}</span></button>`
-  ).join('');
-}
-
-function enterUsbDevice(encMp){
-  browseRoot = decodeURIComponent(encMp);
-  $('browse-confirm').disabled = false;
-  loadBrowse(encMp, encMp);
+  currentPath = $('f-'+field).value || '/vol1';    // 任意设备：整机允许范围自由浏览
+  loadBrowse(encPath(currentPath));
 }
 
 async function loadBrowse(encPathArg, encRootArg){
   const path = decodeURIComponent(encPathArg);
   const root = encRootArg!==undefined ? decodeURIComponent(encRootArg) : browseRoot;
   const r = await api('/api/browse?path='+encPath(path)+(root?'&root='+encPath(root):''));
-  if (!r.success){ toast(r.error||'无法读取该目录','error'); return; }
+  if (!r.success){
+    // 读取失败时清掉旧列表与旧路径：否则会残留上一次的目录列表，
+    // 看着还能选，确认下去却是个无效路径（绑定的设备被拔掉时就会这样）
+    toast(r.error||'无法读取该目录','error');
+    currentPath='';
+    $('browse-path').textContent = '无法读取该目录';
+    $('browse-confirm').disabled = true;
+    $('browse-list').innerHTML = '<div class="nd">该目录不可访问，请重新选择</div>';
+    return;
+  }
   currentPath = r.path; browseRoot = root||''; 
   $('browse-path').textContent = r.path;
   $('browse-confirm').disabled = false;
 
   const items = [];
-  // 多设备时给一个回到设备列表的入口（单设备且已绑定就没必要）
-  if (browseUsbOnly && devices.length>1)
-    items.push('<button class="browse-item" onclick="openUsbRoots()">← 设备列表</button>');
   // 到了设备根目录就不再提供"返回上级"，避免走进本机卷
   const atRoot = browseRoot && currentPath === browseRoot;
   if (!atRoot && currentPath !== '/')
