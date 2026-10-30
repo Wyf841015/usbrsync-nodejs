@@ -209,11 +209,16 @@ export function exitMeaning(code) {
 export function extractErrors(out, limit = 5) {
   const seen = new Set();
   const res = [];
-  for (const raw of String(out || '').split(/\r?\n/)) {
-    const line = raw.trim();
+  // 进度输出用 \r 刷新，错误行常被拼在进度行后面
+  // 例: "\r    0 100%  0.00kB/s 0:00:00 (xfr#0, to-chk=0/0)rsync: [sender] change_dir ... failed"
+  // 所以既要按 \r 也要按 \n 切，还要把关键字的起点截出来
+  for (const raw of String(out || '').split(/[\r\n]+/)) {
+    let line = raw.trim();
     if (!line) continue;
-    if (!/^(rsync|rsync error|cp|mkstemp|send_files|recv_files|symlink|readlink)|failed|denied|No space|Cannot|Invalid|error:/i.test(line)) continue;
-    if (/^\s*\d+\s+\d+%/.test(line)) continue;      // 进度行不算错误
+    const cut = line.search(/rsync(?: error)?:|cp:|mkstemp|send_files|recv_files|symlink|readlink|failed|denied|No space|Cannot|Invalid|error:/i);
+    if (cut < 0) continue;
+    if (cut > 0) line = line.slice(cut).trim();
+    if (/^\d+\s+\d+%/.test(line)) continue;          // 进度行不算错误
     const key = line.slice(0, 120);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -305,7 +310,8 @@ function execRsync(child, synclog, onProgress) {
         if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
         flush();
         if (_hook?.log) _hook.log(`execRsync done code=${code} (stdout ${out.length}B, 传输 ${filesTransferred} 文件, 删除 ${deletedCount})`);
-        res({ code, out, filesTransferred, deletedCount });
+        // progress2 下只有 xfr# 能反映真实传输文件数，itemize 计数仅作兜底
+        res({ code, out, filesTransferred: Math.max(filesTransferred, maxXfr), deletedCount });
       }
     };
     const touch = () => { lastActivity = Date.now(); };
@@ -323,7 +329,7 @@ function execRsync(child, synclog, onProgress) {
       }, EXEC_IDLE_TIMEOUT_MS);
     };
     if (_hook?.log) _hook.log(`execRsync spawned pid=${child.pid}`);
-    let filesTransferred = 0, deletedCount = 0;
+    let filesTransferred = 0, deletedCount = 0, maxXfr = 0;
     child.stdout.on('data', (d) => {
       touch();
       const str = d.toString();
@@ -335,10 +341,14 @@ function execRsync(child, synclog, onProgress) {
         if (line.startsWith('>f')) filesTransferred++;
         const p = parseProgressLine(line);
         if (p.deleted) deletedCount++;
+        if (p.xfr && p.xfr > maxXfr) maxXfr = p.xfr;
         if (p.pct !== null || p.itemized) lastP = p;
       }
       if (lastP && onProgress) {
-        try { onProgress({ ...lastP, filesTransferred, deletedCount }); }
+        // progress2 会抑制逐文件 itemize 行，所以「已传输文件数」优先用 xfr#（rsync 自报），
+        // itemize 计数只作为兜底（老版本 rsync 或非 progress2 场景）
+        const transferred = Math.max(filesTransferred, lastP.xfr || 0);
+        try { onProgress({ ...lastP, filesTransferred: transferred, deletedCount }); }
         catch (e) { if (_hook?.log) _hook.log(`onProgress err ${e.message}`); }
       }
     });
@@ -404,9 +414,15 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
       // 只有「整目录进不去」才算掉盘；单个文件在同步中消失（rsync 23/24）
       // 属于正常局部失败，不能整单判失败（否则会白占了 pending 的重试次数）
       const deadMark = isDeviceLost({ out: r.out, source: opts.source, target: opts.target });
-      if (deadMark) deadEncountered = true;
-      if ([0,24].includes(r.code) || (r.code === 23 && !deadMark)) { exitCode = r.code; out = r.out; break; }
-      if (deadMark) break;  // 源/目标不可用, 立即重试无意义, 交待补机制处理
+      if (deadMark) {
+        deadEncountered = true;
+        // 保留真实退出码与输出：否则历史里 exit_code 只能是 -1、errors 为空，
+        // 用户看不到 "No such file or directory" 这种关键信息
+        exitCode = r.code === 0 ? -1 : r.code;
+        out = r.out;
+        break;   // 源/目标不可用, 立即重试无意义, 交待补机制处理
+      }
+      if ([0,24].includes(r.code) || r.code === 23) { exitCode = r.code; out = r.out; break; }
       if (attempt <= maxRetry) {
         setStatus('syncing', 0, '', `第 ${attempt} 次失败，${retryDelay} 秒后重试`, '', 0);
         await new Promise((r2) => setTimeout(r2, retryDelay * 1000));
@@ -435,6 +451,7 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
     let success = false, msg, level = 2;
     if (stopRequested) { success = false; msg = '已停止'; level = 2; }
     else if (exitCode === -1 && deadEncountered) { success = false; msg = '源/目标不可用 (设备可能已拔出)'; }
+    else if (deadEncountered) { success = false; msg = '源/目标不可用 (设备可能已拔出)'; }
     else if (exitCode === 0) { success = true; msg = '同步完成'; level = 0; }
     else if (exitCode === 23) { success = true; msg = '同步完成（部分文件未能传输，见日志）'; level = 1; }
     else if (exitCode === 24) { success = true; msg = '同步完成（部分源文件在传输中消失，已跳过）'; level = 1; }
@@ -465,12 +482,23 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
       message:msg, started_at:start, finished_at:end, duration, bytes, files,
       exit_code:exitCode, attempts:attempt, diff_bytes:diffBytes, synced,
       // ── 新增：让人不用翻日志就能看懂这次同步 ──
-      exit_meaning: exitMeaning(exitCode),
-      partial: exitCode === 23 || exitCode === 24,
+      exit_meaning: deadEncountered ? '源/目标不可用（设备可能已拔出）' : exitMeaning(exitCode),
+      partial: !deadEncountered && (exitCode === 23 || exitCode === 24),
       files_done: lastRun.filesTransferred,
-      deleted: lastRun.deletedCount,
+      // progress2 会抑制 "*deleting" 输出行，所以删除数取 --stats 的
+      // "Number of deleted files"，itemize 计数只作兜底
+      deleted: (() => {
+        const st = parseStats(out || '');
+        return (st.deletedReg || st.deleted) || lastRun.deletedCount;
+      })(),
       bytes_total: opts.totalBytes || 0,
-      speed_bps: duration > 0 ? Math.round(bytes / duration) : 0,
+      // 平均速度：优先用 rsync 自己报的 bytes/sec（亚秒级同步时 duration 会取整成 0，
+      // 光算 bytes/duration 会得到 0），再用 bytes/duration 兜底
+      speed_bps: (() => {
+        const m = String(out || '').match(/([\d,.]+)\s+bytes\/sec/);
+        if (m) { const v = parseInt(m[1].replace(/[,.](?=\d{3}\b)/g,''), 10); if (v > 0) return v; }
+        return duration > 0 ? Math.round(bytes / duration) : 0;
+      })(),
       bidirectional: !!opts.bidirectional,
       checksum: !!opts.checksum,
       use_delete: !!opts.del,

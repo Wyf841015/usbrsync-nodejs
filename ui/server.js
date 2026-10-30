@@ -16,7 +16,7 @@ import { collectUsbMounts } from './usb.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
-const VERSION = '0.4.8';
+const VERSION = '0.4.9';
 
 // ── 数据目录 ───────────────────────────────────────────────────
 const DATA_BASE = process.env.TRM_PKGVAR || '/tmp/usbrsync-nodejs';
@@ -241,6 +241,9 @@ async function requestSync(p) {
   if (!p.source || !p.target || !isAllowedPath(p.source) || !isAllowedPath(p.target)) {
     return { status:'error', message:'路径不允许或缺失' };
   }
+  // 源/目标不存在时不要强行跑：rsync 会以 23 失败，历史里只剩一条难懂的退出码
+  if (!existsSync(p.source)) return { status:'error', message:`源目录不存在：${p.source}` };
+  if (!existsSync(p.target)) return { status:'error', message:`目标目录不存在：${p.target}` };
 
   // ── 预检（一次 dry-run，同时拿到「要写多少字节」与「会删多少项」）──
   // 取代原先每次同步都跑的全盘 `du -sb`；也是 --delete 的护栏。
@@ -479,6 +482,7 @@ async function handleApi(pathname, req, res) {
         const h = loadHistory();
         const now = Math.floor(Date.now()/1000);
         let total=0, ok=0, partial=0, bytes=0, duration=0, files=0, deleted=0;
+        let speedSum = 0, speedN = 0;
         const byTask = new Map(), errCount = new Map(), daily = new Map();
         let lastOk = 0, lastFail = 0;
         for (const e of h) {
@@ -486,6 +490,8 @@ async function handleApi(pathname, req, res) {
           if (e.partial) partial++;
           const b = e.bytes || 0, d = e.duration || 0;
           bytes += b; duration += d; files += (e.files||0); deleted += (e.deleted||0);
+          // 亚秒级同步 duration 会取整成 0，所以另外统计有 speed_bps 的记录做平均
+          if (e.speed_bps > 0) { speedSum += e.speed_bps; speedN++; }
           if (e.success && (e.finished_at||0) > lastOk) lastOk = e.finished_at || 0;
           if (!e.success && (e.finished_at||0) > lastFail) lastFail = e.finished_at || 0;
           const tk = e.task_id || '(未命名任务)';
@@ -518,7 +524,7 @@ async function handleApi(pathname, req, res) {
           success:true, total, ok, fail:total-ok, partial, bytes, duration,
           success_rate: total ? Math.round(ok/total*1000)/10 : 0,
           avg_duration: total ? Math.round(duration/total) : 0,
-          avg_speed: duration ? Math.round(bytes/duration) : 0,
+          avg_speed: duration ? Math.round(bytes/duration) : (speedN ? Math.round(speedSum/speedN) : 0),
           avg_bytes: total ? Math.round(bytes/total) : 0,
           files, deleted, last_ok_at: lastOk, last_fail_at: lastFail,
           last24h: { total: last24.length, ok: last24.filter(e=>e.success).length,

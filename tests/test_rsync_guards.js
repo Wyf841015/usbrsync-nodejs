@@ -75,6 +75,17 @@ test('extractErrors：挑出错误行，跳过进度行并去重', () => {
   assert.match(errs[0], /Permission denied/);
 });
 
+test('extractErrors：错误行被 \\r 拼在进度行后面也要抓出来', () => {
+  // rsync 用 \r 刷新进度，错误行常紧贴进度行尾部（实测输出）
+  const out = '\r              0 100%    0.00kB/s    0:00:00 (xfr#0, to-chk=0/0)' +
+              'rsync: [sender] change_dir "/tmp/no-such" failed: No such file or directory (2)\n' +
+              'rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1338)\n';
+  const errs = extractErrors(out, 5);
+  assert.equal(errs.length, 2, JSON.stringify(errs));
+  assert.match(errs[0], /change_dir/);
+  assert.match(errs[1], /code 23/);
+});
+
 test('extractErrors：空输入返回空数组，limit 生效', () => {
   assert.deepEqual(extractErrors(''), []);
   const many = Array.from({ length: 10 }, (_, i) => `rsync: error: failed item ${i}`).join('\n');

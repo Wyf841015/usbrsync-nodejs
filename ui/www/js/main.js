@@ -10,14 +10,19 @@ async function loadAll(){await Promise.all([loadStatus(),loadDevices(),loadTasks
 async function loadStatus(){const r=await api('/api/status');if(!r.success)return;$('status-text').textContent=r.device_count?`已连接 ${r.device_count} 个设备`:'等待 USB 设备';$('k-device').textContent=r.device_count;$('k-task').textContent=r.tasks_count;updateSyncUI(r.sync)}
 async function loadDevices(){const r=await api('/api/devices');
   if(r.success===false){$('devices').innerHTML=`<div class="nd danger">设备列表加载失败：${esc(r.error||'接口错误')}</div>`;return}
-  devices=r.devices||[];$('devices').innerHTML=devices.length?devices.map(d=>`<div class="dc"><b>${esc(d.name||'USB')}</b><span>${esc(d.mount_point)} · ${esc(d.fs_type)} · ${size(d.size)}</span><small>UUID ${esc(d.uuid||'未知')}</small></div>`).join(''):'<div class="nd">未检测到 USB 设备</div>'}
+  devices=r.devices||[];
+  $('k-device').textContent=devices.length;
+  $('k-device-sub').textContent=devices.length?`${devices.length} 个分区已挂载`:'未连接';$('devices').innerHTML=devices.length?devices.map(d=>`<div class="dc"><b>${esc(d.name||'USB')}</b><span>${esc(d.mount_point)} · ${esc(d.fs_type)} · ${size(d.size)}</span><small>UUID ${esc(d.uuid||'未知')}</small></div>`).join(''):'<div class="nd">未检测到 USB 设备</div>'}
 async function loadDrives(){const r=await api('/api/drives');
   if(r.success===false){$('drives').innerHTML=`<div class="nd danger">卷信息加载失败：${esc(r.error||'接口错误')}</div>`;return}
   $('drives').innerHTML=(r.drives||[]).map(d=>{let p=d.size?Math.round((d.size-d.free)/d.size*100):0;return`<div class="drive" title="已用 ${p}%"><div><b>${esc(d.name)}</b><span>已用 ${p}% · 可用 ${size(d.free)} / ${size(d.size)}</span></div><div class="mini"><i style="width:${p}%"></i></div></div>`}).join('')||'<div class="nd">没有可用卷</div>'}
 async function loadTasks(){const r=await api('/api/tasks');
   // 接口失败时不能把列表清空成「还没有同步任务」——那是把故障伪装成空数据
   if(r.success===false){if(!tasks.length)$('tasks').innerHTML=`<div class="nd danger">任务列表加载失败：${esc(r.error||'接口错误')}</div>`;return}
-  tasks=r.tasks?.sync_tasks||[];tasks.forEach((t,i)=>{t.id=t.id||'task_'+Date.now()+'_'+i});renderTasks()}
+  tasks=r.tasks?.sync_tasks||[];tasks.forEach((t,i)=>{t.id=t.id||'task_'+Date.now()+'_'+i});renderTasks();
+  const auto=tasks.filter(t=>t.auto_sync_on_insert).length, sched=tasks.filter(t=>t.schedule&&t.schedule!=='none').length;
+  $('k-task').textContent=tasks.length;
+  $('k-task-sub').textContent=`自动 ${auto} · 计划 ${sched}`}
 async function saveTasks(){const r=await api('/api/tasks','POST',{sync_tasks:tasks,exclusions:['*.tmp','*.temp','~*','.DS_Store','Thumbs.db','System Volume Information','$RECYCLE.BIN/']});if(r.success)toast('任务已保存','success');return r.success}
 function renderTasks(){$('tasks').innerHTML=tasks.length?tasks.map((t,i)=>`<article class="ti ${t.enabled===false?'disabled':''}"><div class="task-head"><div><b>${esc(t.name||'未命名任务')}</b><small>${esc(t.source||'未选择')} → ${esc(t.target||'未选择')}</small></div><span class="badge">${t.auto_sync_on_insert?'自动':'手动'}</span></div><div class="chips"><span>${t.bidirectional?'双向':'单向'}</span>${t.device_uuid?`<span>USB: ${esc(t.device_label||t.device_uuid)}</span>`:''}${t.schedule&&t.schedule!=='none'?`<span>${t.schedule==='daily'?'每天':'每周'} ${esc(t.schedule_time||'02:00')}</span>`:''}<span>重试 ${+t.retry_count||0} 次</span>${t.checksum?'<span>校验</span>':''}</div><div class="task-actions"><button class="btn bp btn-sm" onclick="runTask(${i})">同步</button><button class="btn bd btn-sm" onclick="restoreTask(${i})">恢复</button><button class="btn bs btn-sm" onclick="diffTask(${i})">对比</button><button class="btn bs btn-sm" onclick="previewTask(${i})">预览</button><button class="btn bs btn-sm" onclick="editTask(${i})">编辑</button><button class="btn bs btn-sm" onclick="copyTask(${i})">复制</button><button class="btn bd btn-sm" onclick="deleteTask(${i})">删除</button></div></article>`).join(''):'<div class="nd">还没有同步任务</div>'}
 function editTask(i){editing=i;const t=i<0?{id:'task_'+Date.now(),name:'新同步任务',enabled:true,auto_sync_on_insert:false,schedule:'none',schedule_time:'02:00',retry_count:2,retry_delay:5,check_space:true,notify:true,task_exclusions:[]}:tasks[i];$('f-name').value=t.name||'';$('f-source').value=t.source||'';$('f-target').value=t.target||'';$('f-device').innerHTML='<option value="">任意设备</option>'+devices.map(d=>`<option value="${esc(d.uuid)}">${esc(d.name)} (${esc(d.uuid)})</option>`).join('');$('f-device').value=t.device_uuid||'';$('f-schedule').value=t.schedule||'none';$('f-time').value=t.schedule_time||'02:00';$('f-retry').value=t.retry_count??2;$('f-delay').value=t.retry_delay??5;$('f-exclusions').value=(t.task_exclusions||[]).join('\n');[['enabled','enabled'],['auto','auto_sync_on_insert'],['bidir','bidirectional'],['delete','use_delete'],['space','check_space'],['checksum','checksum'],['notify','notify'],['keep','keep_history']].forEach(([a,b])=>$('f-'+a).checked=t[b]!==false&&(b==='enabled'||b==='check_space'||b==='notify')?true:!!t[b]);$('task-modal').style.display='flex'}
@@ -36,13 +41,128 @@ async function sortTasks(){tasks.sort((a,b)=>(a.name||'').localeCompare(b.name||
 function startSyncMonitor(){if(syncStatusTimer)return;syncStatusTimer=setInterval(loadSyncStatus,1500);loadSyncStatus()}
 function stopSyncMonitor(){if(syncStatusTimer){clearInterval(syncStatusTimer);syncStatusTimer=null}}
 async function loadSyncStatus(){const r=await api('/api/sync_status');if(!r.success)return;updateSyncUI(r.sync);if(['idle','error'].includes(r.sync.status)){const now=Date.now();if(now-(window._lastHistRefresh||0)>4000){window._lastHistRefresh=now;loadHistory()}}}
-function updateSyncUI(s={}){let el=$('sync-progress');if(s.status==='syncing'){let p=+s.progress||0;el.innerHTML=`<div class="progress-meta"><b>${esc(s.message||'同步中')}</b><span>${p}% ${esc(s.speed||'')}</span></div><div class="progress-bar"><i style="width:${p}%"></i></div><div class="current-file">${esc(s.current_file||'')}</div><button class="btn bd btn-sm" onclick="stopSync()">停止同步</button>`}else el.innerHTML=`<div class="state ${s.status==='error'?'bad':''}">${esc(s.message||'空闲')}</div>`}
+// ── 进度展示 ────────────────────────────────────────────────────
+// 数据来自后端 setSyncStatus 的 extra：已传/总量、速度、ETA、文件计数、删除数
+function hms(sec){sec=Math.max(0,Math.round(Number(sec)||0));const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),ss=sec%60;
+  return h?`${h}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`:`${m}:${String(ss).padStart(2,'0')}`}
+function etaText(v){if(!v)return '—';const p=String(v).split(':').reverse().map(Number);
+  const sec=(p[0]||0)+(p[1]||0)*60+(p[2]||0)*3600;
+  if(sec<=0)return '即将完成';
+  return sec>=3600?hms(sec):(sec>=60?Math.floor(sec/60)+' 分 '+sec%60+' 秒':sec+' 秒')}
+function bps(v){v=Number(v)||0;return v>0?size(v)+'/s':'—'}
+
+function updateSyncUI(s={}){
+  const el=$('sync-progress'), acts=$('prog-actions');
+  if(s.status==='syncing'||s.status==='preflight'){
+    const p=Math.max(0,Math.min(100,+s.progress||0));
+    const done=Number(s.bytes_done)||0, tot=Number(s.bytes_total)||0;
+    const elapsed=s.started_at?Math.floor(Date.now()/1000-s.started_at):0;
+    const filesTotal=Number(s.files_total)||0, filesLeft=Number(s.files_left)||0;
+    el.innerHTML=`<div class="progress-meta"><b>${esc(s.message||'同步中')}</b><span>${p}% ${esc(s.speed||'')}</span></div>
+      <div class="progress-bar"><i style="width:${p}%"></i></div>
+      <div class="prog-metrics">
+        <div><span>已传输</span><b>${done?size(done):'—'}${tot?' / '+size(tot):''}</b></div>
+        <div><span>瞬时速度</span><b>${esc(s.speed||'—')}</b></div>
+        <div><span>已用时</span><b>${elapsed?hms(elapsed):'—'}</b></div>
+        <div><span>剩余时间</span><b>${etaText(s.eta)}</b></div>
+        <div><span>本次传输文件</span><b>${Number(s.files_done)||0}</b></div>
+        <div><span>待检查文件</span><b>${filesTotal?(filesTotal-filesLeft)+' / '+filesTotal:'—'}</b></div>
+      </div>
+      <div class="current-file" title="${esc(s.current_file||'')}">${esc(s.current_file||'')}</div>`;
+    acts.innerHTML=`<button class="btn bd btn-sm" onclick="stopSync()">停止同步</button>`;
+  } else {
+    acts.innerHTML='';
+    el.innerHTML=`<div class="state ${s.status==='error'?'bad':''}">${esc(s.message||'空闲')}</div>`;
+  }
+}
 async function stopSync(){if(!confirm('停止当前同步？'))return;await api('/api/sync_stop','POST',{});updateSyncUI({status:'idle',message:'已停止'})}
-async function loadHistory(){const [r,s]=await Promise.all([api('/api/history'),api('/api/stats')]);
+// ── 统计与历史 ──────────────────────────────────────────────────
+let histFilter='all', histStats={};
+function setHistFilter(f,btn){histFilter=f;
+  const box=$('hist-filter');if(box)[...box.children].forEach(b=>b.classList.toggle('on',b===btn));
+  drawHistory(histStats);}
+
+function drawTrend(daily){
+  const box=$('trend');if(!box)return;
+  const max=Math.max(1,...daily.map(d=>d.total));
+  box.innerHTML=daily.map(d=>`<div class="bar" title="${d.date} · 共 ${d.total} 次（成功 ${d.ok} / 失败 ${d.fail}）· ${size(d.bytes)}">
+      <div class="bar-track"><i class="ok" style="height:${d.ok?Math.max(8,Math.round(d.ok/max*100)):0}%"></i><i class="bad" style="height:${d.fail?Math.max(8,Math.round(d.fail/max*100)):0}%"></i></div>
+      <span>${d.date.slice(5)}</span><b>${d.total}</b></div>`).join('');
+}
+
+function drawTaskStats(list){
+  const box=$('by-task');if(!box)return;
+  if(!list.length){box.innerHTML='<div class="nd">暂无数据</div>';return}
+  box.innerHTML=list.map(t=>{const rate=t.total?Math.round(t.ok/t.total*100):0;
+    return `<div class="ts-row"><b title="${esc(t.task_id)}">${esc(t.task_name||t.task_id)}</b>
+      <span>${t.total} 次 · 成功 ${t.ok} / 失败 ${t.fail}</span>
+      <span>${size(t.bytes)}</span><span>成功率 ${rate}%</span>
+      <span>均耗时 ${t.total?duration(Math.round(t.duration/t.total)):'—'}</span></div>`}).join('');
+}
+
+function drawErrors(list){
+  const box=$('top-errors');if(!box)return;
+  if(!list.length){box.innerHTML='<div class="nd">没有失败记录</div>';return}
+  box.innerHTML=list.map((e,i)=>`<div class="err-item"><span class="rank">${i+1}</span><b>${esc(e.reason)}</b><span>${e.count} 次</span></div>`).join('');
+}
+
+function drawHistory(st){
+  const box=$('history');if(!box)return;
+  const all=(st.history||[]).slice().reverse();
+  const list=histFilter==='ok'?all.filter(h=>h.success):histFilter==='fail'?all.filter(h=>!h.success):all;
+  if(!list.length){box.innerHTML=`<div class="nd">${all.length?'当前筛选下没有记录':'暂无同步历史'}</div>`;return}
+  box.innerHTML=list.map(h=>{
+    const files=h.files_done??h.files??0;
+    const opts=[h.use_delete?'--delete':'',h.bidirectional?'双向':'',h.checksum?'校验':''].filter(Boolean).join(' · ')||'默认';
+    return `<div class="hist-row ${h.success?'':'fail'}" onclick="toggleHist(this)">
+      <span class="status ${h.success?'ok':'bad'}">${h.success?(h.partial?'部分':'成功'):'失败'}</span>
+      <div class="hist-main">
+        <b title="${esc(h.source)} → ${esc(h.target)}">${esc(h.source)} → ${esc(h.target)}</b>
+        <small>${new Date((h.finished_at||0)*1000).toLocaleString()} · 耗时 ${duration(h.duration)} · ${files} 文件 · ${size(h.bytes)}${h.deleted?` · 删除 ${h.deleted}`:''}${h.attempts>1?` · 尝试 ${h.attempts} 次`:''}${h.speed_bps?` · 均速 ${bps(h.speed_bps)}`:''}</small>
+      </div>
+      <code>${esc(h.exit_code??'-')}</code><i class="chev">▾</i>
+      <div class="hist-detail">
+        <div class="hd-row"><span>结果</span><b>${esc(h.message||'')}</b></div>
+        <div class="hd-row"><span>退出码</span><b>${esc(h.exit_code??'-')} · ${esc(h.exit_meaning||'')}</b></div>
+        <div class="hd-row"><span>开始 / 结束</span><b>${new Date((h.started_at||0)*1000).toLocaleString()} → ${new Date((h.finished_at||0)*1000).toLocaleTimeString()}</b></div>
+        <div class="hd-row"><span>本次需传输</span><b>${h.bytes_total?size(h.bytes_total):'—'}</b></div>
+        <div class="hd-row"><span>选项</span><b>${opts}${h.keep_history?' · 保留历史':''}</b></div>
+        ${h.diff_bytes!==undefined?`<div class="hd-row"><span>剩余差异</span><b>${h.synced?'0 B':'<span class="danger">'+size(h.diff_bytes)+'</span>'}</b></div>`:''}
+        ${(h.errors&&h.errors.length)?`<div class="hd-errors"><span>错误</span>${h.errors.map(e=>`<code>${esc(e)}</code>`).join('')}</div>`:''}
+      </div>
+    </div>`}).join('');
+}
+
+function toggleHist(el){if(el)el.classList.toggle('open');}
+
+async function loadHistory(){
+  const q=histFilter==='all'?'':`?result=${histFilter}`;
+  const [r,s]=await Promise.all([api('/api/history'+q),api('/api/stats')]);
   // 统计接口失败时不要把 KPI 覆盖成 0（看起来像"从未成功"）
-  if(s.success!==false){$('k-success').textContent=s.ok||0;$('k-bytes').textContent=size(s.bytes)}
-  if(r.success===false){$('history').innerHTML=`<div class="nd danger">历史记录加载失败：${esc(r.error||'接口错误')}</div>`;return}
-  $('history').innerHTML=(r.history||[]).slice().reverse().map(h=>`<div class="history-row"><span class="status ${h.success?'ok':'bad'}">${h.success?'成功':'失败'}</span><div><b>${esc(h.source)} → ${esc(h.target)}</b><small>${new Date((h.finished_at||0)*1000).toLocaleString()} · ${h.files||0} 文件 · ${size(h.bytes)} · ${duration(h.duration)} · 尝试 ${h.attempts||1} 次${h.diff_bytes!==undefined?` · 剩余差异 ${h.synced?'0 B':'<span class="danger">'+size(h.diff_bytes)+'</span>'}`:''}</small></div><code>${esc(h.exit_code??'-')}</code></div>`).join('')||'<div class="nd">暂无同步历史</div>'}
+  if(s.success!==false){
+    $('k-success').textContent=s.ok||0;
+    $('k-fail').textContent=s.fail||0;
+    // 有失败时给失败卡加警示色（0 失败时不加，避免视觉噪声）
+    const failCard=$('k-fail').closest('article');
+    if(failCard)failCard.classList.toggle('is-bad',(s.fail||0)>0);
+    $('k-bytes').textContent=size(s.bytes);
+    $('k-speed').textContent=s.avg_speed?size(s.avg_speed)+'/s':'—';
+    $('k-success-sub').textContent=`成功率 ${s.success_rate??0}%`;
+    $('k-fail-sub').textContent=`近 24h ${s.last24h?s.last24h.fail:0} 次失败`;
+    $('k-bytes-sub').textContent=`近 24h ${size(s.last24h?s.last24h.bytes:0)}`;
+    $('k-speed-sub').textContent=`均耗时 ${s.avg_duration?duration(s.avg_duration):'—'}`;
+    if(s.daily)drawTrend(s.daily);
+    if(s.top_errors)drawErrors(s.top_errors);
+    if(s.by_task)drawTaskStats(s.by_task);
+  }
+  if(r.success===false){
+    $('history').innerHTML=`<div class="nd danger">历史记录加载失败：${esc(r.error||'接口错误')}</div>`;
+    return;
+  }
+  histStats={history:r.history||[]};
+  drawHistory(histStats);
+  $('hist-count').textContent=`共 ${r.total??(r.history||[]).length} 次`;
+}
 async function clearHistory(){if(!confirm('清空全部同步历史？'))return;await api('/api/history?action=clear','POST',{});loadHistory()}
 // ── 目录浏览 ──────────────────────────────────────────────────
 // 源目录只允许在 USB 设备内浏览：browseRoot 锁住设备挂载点，界面上没有
