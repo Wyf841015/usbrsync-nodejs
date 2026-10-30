@@ -50,6 +50,23 @@ function etaText(v){if(!v)return '—';const p=String(v).split(':').reverse().ma
   if(sec<=0)return '即将完成';
   return sec>=3600?hms(sec):(sec>=60?Math.floor(sec/60)+' 分 '+sec%60+' 秒':sec+' 秒')}
 function bps(v){v=Number(v)||0;return v>0?size(v)+'/s':'—'}
+// 时间统一用中文格式：不写死 locale 时英文环境会渲染成 10/30/2026 4:36:17 PM
+function fmtTime(ts,withDate=true){if(!ts)return '—';const d=new Date(ts*1000);
+  const p=n=>String(n).padStart(2,'0');
+  const hm=`${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  return withDate?`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${hm}`:hm}
+// 失败退出码给人看：行内只放短标签，完整含义在展开详情里
+function exitShort(h){
+  if(h.success)return '';
+  const c=h.exit_code;
+  if(c===-1)return '已中止';
+  if(c===-999)return '已停止';
+  if(c===13)return '权限不足';
+  if(c===11)return 'IO 错误';
+  if(c===30||c===35)return '超时';
+  if(c===23)return '部分失败';
+  return (c===undefined||c===null)?'失败':('退出 '+c);
+}
 
 function updateSyncUI(s={}){
   const el=$('sync-progress'), acts=$('prog-actions');
@@ -120,15 +137,15 @@ function drawHistory(st){
       <div class="hist-main">
         <b class="task-name">${tname?esc(tname):esc(h.source)+' → '+esc(h.target)}</b>
         ${tname?`<em class="hist-path" title="${esc(h.source)} → ${esc(h.target)}">${esc(h.source)} → ${esc(h.target)}</em>`:''}
-        <small>${new Date((h.finished_at||0)*1000).toLocaleString()} · 耗时 ${duration(h.duration)} · ${files} 文件 · ${size(h.bytes)}${h.deleted?` · 删除 ${h.deleted}`:''}${h.attempts>1?` · 尝试 ${h.attempts} 次`:''}${h.speed_bps?` · 均速 ${bps(h.speed_bps)}`:''}</small>
+        <small>${fmtTime(h.finished_at)} · 耗时 ${duration(h.duration)} · ${files} 文件 · ${size(h.bytes)}${h.deleted?` · 删除 ${h.deleted}`:''}${h.attempts>1?` · 尝试 ${h.attempts} 次`:''}${h.speed_bps?` · 均速 ${bps(h.speed_bps)}`:''}</small>
       </div>
-      <code>${esc(h.exit_code??'-')}</code><i class="chev">▾</i>
+      <code title="${esc(h.exit_meaning||'')}">${esc(exitShort(h))}</code><i class="chev">▾</i>
       <div class="hist-detail">
         <div class="hd-row"><span>任务</span><b>${tname?esc(tname):'（未命名 / 旧记录）'}</b></div>
         <div class="hd-row"><span>源 → 目标</span><b>${esc(h.source)} → ${esc(h.target)}</b></div>
         <div class="hd-row"><span>结果</span><b>${esc(h.message||'')}</b></div>
         <div class="hd-row"><span>退出码</span><b>${esc(h.exit_code??'-')}${h.exit_meaning?' · '+esc(h.exit_meaning):''}</b></div>
-        <div class="hd-row"><span>开始 / 结束</span><b>${new Date((h.started_at||0)*1000).toLocaleString()} → ${new Date((h.finished_at||0)*1000).toLocaleTimeString()}</b></div>
+        <div class="hd-row"><span>开始 / 结束</span><b>${fmtTime(h.started_at)} → ${fmtTime(h.finished_at,false)}</b></div>
         <div class="hd-row"><span>本次需传输</span><b>${h.bytes_total?size(h.bytes_total):'—'}</b></div>
         <div class="hd-row"><span>选项</span><b>${opts}${h.keep_history?' · 保留历史':''}</b></div>
         ${h.diff_bytes!==undefined?`<div class="hd-row"><span>剩余差异</span><b>${h.synced?'0 B':'<span class="danger">'+size(h.diff_bytes)+'</span>'}</b></div>`:''}

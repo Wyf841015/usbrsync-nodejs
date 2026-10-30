@@ -643,6 +643,9 @@ code, .mono { font-family: var(--font-mono); font-size: 0.94em; }
 .hist-row code { text-align: right; color: var(--text-3); font-size: 11px; }
 .hist-row .chev { color: var(--text-3); font-size: 10px; font-style: normal; transition: transform var(--t-fast); }
 .hist-row.open .chev { transform: rotate(180deg); }
+/* 展开时整行高亮，让人一眼看出详情属于哪一条 */
+.hist-row.open { background: var(--brand-weak); box-shadow: inset 2px 0 0 var(--brand); }
+.hist-row.open.fail { box-shadow: inset 2px 0 0 var(--bad); }
 
 .hist-detail {
   grid-column: 1 / -1;
