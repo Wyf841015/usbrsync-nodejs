@@ -121,6 +121,49 @@ test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
     assert.strictEqual(r.status, 404);
   });
 
+  // ── 源目录浏览的范围锁（源目录只允许在 USB 设备内）──────────
+  await t.test('browse: root 参数锁定浏览范围', async () => {
+    const fs = await import('node:fs');
+    const rootA = '/tmp/usbrsync-browse-a';
+    const rootB = '/tmp/usbrsync-browse-b';
+    fs.rmSync(rootA, { recursive: true, force: true });
+    fs.rmSync(rootB, { recursive: true, force: true });
+    fs.mkdirSync(`${rootA}/sub`, { recursive: true });
+    fs.mkdirSync(rootB, { recursive: true });
+    t.after(() => { fs.rmSync(rootA, { recursive: true, force: true }); fs.rmSync(rootB, { recursive: true, force: true }); });
+
+    const enc = encodeURIComponent;
+    // 1) root 本身可浏览，并标记 at_root
+    const atRoot = await api(`/api/browse?path=${enc(rootA)}&root=${enc(rootA)}`);
+    assert.strictEqual(atRoot.body.success, true);
+    assert.strictEqual(atRoot.body.at_root, true);
+    assert.strictEqual(atRoot.body.root, rootA);
+    assert.ok(atRoot.body.entries.some((e) => e.name === 'sub'));
+
+    // 2) root 的子目录可浏览，at_root=false
+    const sub = await api(`/api/browse?path=${enc(rootA + '/sub')}&root=${enc(rootA)}`);
+    assert.strictEqual(sub.body.success, true);
+    assert.strictEqual(sub.body.at_root, false);
+
+    // 3) 越界到 root 外 → 拒绝
+    const out = await api(`/api/browse?path=${enc(rootB)}&root=${enc(rootA)}`);
+    assert.strictEqual(out.body.success, false);
+    assert.match(out.body.error, /超出所选 USB 设备范围/);
+
+    // 4) 越界到父目录 → 拒绝
+    const up = await api(`/api/browse?path=${enc('/tmp')}&root=${enc(rootA)}`);
+    assert.strictEqual(up.body.success, false);
+
+    // 5) root 含 ../ → 由 isAllowedPath 拦下
+    const evil = await api(`/api/browse?path=${enc(rootA + '/..')}&root=${enc(rootA)}`);
+    assert.strictEqual(evil.body.success, false);
+
+    // 6) 不带 root（目标目录浏览）仍可跨卷
+    const free = await api('/api/browse?path=%2Fvol1');
+    assert.strictEqual(free.body.success, true);
+    assert.strictEqual(free.body.root, null);
+  });
+
   await t.test('history clear + stats', async () => {
     await api('/api/history?action=clear', 'POST', {});
     const r = await api('/api/history');

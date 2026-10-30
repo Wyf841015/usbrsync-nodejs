@@ -16,7 +16,7 @@ import { collectUsbMounts } from './usb.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
-const VERSION = '0.4.4';
+const VERSION = '0.4.5';
 
 // ── 数据目录 ───────────────────────────────────────────────────
 const DATA_BASE = process.env.TRM_PKGVAR || '/tmp/usbrsync-nodejs';
@@ -378,10 +378,19 @@ async function handleApi(pathname, req, res) {
         send(res,200,{ success:true, lines:readSyncLog(n).length, log:readSyncLog(n) }); return;
       }
       case '/browse': {
-        const dir = readQuery(req).path || '/';
+        const q = readQuery(req);
+        const dir = q.path || '/';
+        // root 参数把浏览范围锁在某个目录内（源目录限 USB 设备用）：
+        // 越界一律拒绝，前端即使被改也出不了设备范围。
+        const root = q.root ? (String(q.root).replace(/\/+$/, '') || '/') : '';
+        if (root && root !== '/' && !isAllowedPath(root))
+          return send(res,200,{success:false,error:'root not allowed'});
+        if (root && dir !== root && !dir.startsWith(root + '/'))
+          return send(res,200,{success:false,error:'路径超出所选 USB 设备范围'});
         // 浏览入口放行根目录 (/), 便于跨卷切换; 同步(/sync)仍用严格 isAllowedPath
         if (dir !== '/' && !isAllowedPath(dir))
           return send(res,200,{success:false,error:'path not allowed'});
+        const meta = { root: root || null, at_root: !!(root && dir === root) };
         if (dir === '/') {
           // 动态列出根下真实卷目录 (volN / mnt / media)
           const rootEntries = [];
@@ -391,17 +400,17 @@ async function handleApi(pathname, req, res) {
             }
           } catch {}
           rootEntries.push({ name:'mnt', type:'dir' }, { name:'media', type:'dir' });
-          return send(res,200,{success:true, path:'/', entries:rootEntries});
+          return send(res,200,{success:true, path:'/', entries:rootEntries, ...meta});
         }
         let entries=[];
         try {
           for (const d of readdirSync(dir)) {
             const p=join(dir,d);
-            entries.push({ name:d, type: statSync(p).isDirectory()?'dir':'file' });
+            entries.push({ name:d, type:statSync(p).isDirectory()?'dir':'file' });
           }
         } catch { return send(res,200,{success:false,error:'not a directory'}); }
         entries.sort((a,b)=>a.name.localeCompare(b.name));
-        send(res,200,{ success:true, path:dir, entries }); return;
+        send(res,200,{ success:true, path:dir, entries, ...meta }); return;
       }
       case '/config_export':
         send(res,200, loadTasks(), { download:'usbrsync-config.json' }); return;

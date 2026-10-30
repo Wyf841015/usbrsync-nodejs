@@ -772,7 +772,9 @@ select.form-control { cursor: pointer; }
 
 .browse-list { max-height: 380px; overflow: auto; margin-top: var(--sp-2); border-radius: var(--r); }
 .browse-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 2px;
   width: 100%;
   padding: 9px 11px;
   font: inherit;
@@ -786,6 +788,16 @@ select.form-control { cursor: pointer; }
   transition: background-color var(--t-fast), color var(--t-fast);
 }
 .browse-item:hover { background: var(--brand-weak); color: var(--brand-text); }
+.browse-item > span:first-of-type { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* 设备列表的第二行：挂载点 + 容量，弱化处理 */
+.browse-sub {
+  flex: 0 0 auto;
+  margin-left: 10px;
+  font-size: 11px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+}
+
 .browse-item:last-child { border-bottom: 0; }
 
 .result-summary { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }

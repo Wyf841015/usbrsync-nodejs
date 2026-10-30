@@ -33,12 +33,106 @@ function updateSyncUI(s={}){let el=$('sync-progress');if(s.status==='syncing'){l
 async function stopSync(){if(!confirm('停止当前同步？'))return;await api('/api/sync_stop','POST',{});updateSyncUI({status:'idle',message:'已停止'})}
 async function loadHistory(){const [r,s]=await Promise.all([api('/api/history'),api('/api/stats')]);$('k-success').textContent=s.ok||0;$('k-bytes').textContent=size(s.bytes);$('history').innerHTML=(r.history||[]).slice().reverse().map(h=>`<div class="history-row"><span class="status ${h.success?'ok':'bad'}">${h.success?'成功':'失败'}</span><div><b>${esc(h.source)} → ${esc(h.target)}</b><small>${new Date((h.finished_at||0)*1000).toLocaleString()} · ${h.files||0} 文件 · ${size(h.bytes)} · ${duration(h.duration)} · 尝试 ${h.attempts||1} 次${h.diff_bytes!==undefined?` · 剩余差异 ${h.synced?'0 B':'<span class="danger">'+size(h.diff_bytes)+'</span>'}`:''}</small></div><code>${esc(h.exit_code??'-')}</code></div>`).join('')||'<div class="nd">暂无同步历史</div>'}
 async function clearHistory(){if(!confirm('清空全部同步历史？'))return;await api('/api/history?action=clear','POST',{});loadHistory()}
-function openBrowse(field){browseMode='field';browseField=field;$('browse-title').textContent='选择目录';$('browse-confirm').textContent='选择当前目录';currentPath=$('f-'+field).value||'/vol1';$('browse-modal').style.display='flex';loadBrowse(encodeURIComponent(currentPath))}
-async function loadBrowse(encPath){const r=await api('/api/browse?path='+encPath);if(!r.success)return;$('browse-path').textContent=r.path;currentPath=r.path;let up=currentPath==='/'?'':`<button class="browse-item" onclick="loadBrowse('${encodeURIComponent(currentPath.replace(/\/$/,'').split('/').slice(0,-1).join('/')||'/')}')">↑ 返回上级</button>`;$('browse-list').innerHTML=up+(r.entries||[]).filter(x=>x.type==='dir').map(x=>`<button class="browse-item" onclick="loadBrowse('${encodeURIComponent((currentPath==='/'?'':currentPath)+'/'+x.name)}')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>${esc(x.name)}</button>`).join('')}
-function confirmBrowse(){
-  if(browseMode==='save'){const dir=currentPath;closeBrowse();savePendingTo(dir);}
-  else{$('f-'+browseField).value=currentPath;closeBrowse();}
+// ── 目录浏览 ──────────────────────────────────────────────────
+// 源目录只允许在 USB 设备内浏览：browseRoot 锁住设备挂载点，界面上没有
+// "返回上级"能走到 /vol1、/mnt 这些本机卷；后端 /api/browse?root= 再校验一次。
+// 目标目录仍可在允许的卷内自由浏览。
+let browseRoot='', browseUsbOnly=false;
+const FOLDER_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;margin-right:8px"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>';
+
+function deviceByUuid(uuid){return devices.find(d=>d.uuid===uuid)||null}
+function encPath(p){return encodeURIComponent(p)}
+
+function openBrowse(field){
+  browseMode='field'; browseField=field; browseRoot='';
+  browseUsbOnly = (field==='source');
+  $('browse-confirm').disabled = false;
+  $('browse-title').textContent = browseUsbOnly ? '选择 USB 源目录' : '选择目标目录';
+  $('browse-confirm').textContent = '选择当前目录';
+  $('browse-modal').style.display='flex';
+  if (browseUsbOnly) return openUsbRoots();       // 源目录：只能看 USB
+  currentPath = $('f-'+field).value || '/vol1';
+  loadBrowse(encPath(currentPath));
 }
+
+// 源目录第一层：只列 USB 设备挂载点
+function openUsbRoots(){
+  browseRoot=''; currentPath='';
+  if (!devices.length){
+    $('browse-path').textContent = '未检测到 USB 设备';
+    $('browse-confirm').disabled = true;
+    $('browse-list').innerHTML = '<div class="nd">请先插入并挂载 USB 设备</div>';
+    return;
+  }
+  const dev = deviceByUuid($('f-device').value);
+  if (dev){                                        // 已绑定设备：直接进它，出不去
+    browseRoot = dev.mount_point;
+    const cur = $('f-source').value || '';
+    const start = (cur===browseRoot || cur.startsWith(browseRoot+'/')) ? cur : browseRoot;
+    $('browse-confirm').disabled = false;
+    return loadBrowse(encPath(start), encPath(browseRoot));
+  }
+  $('browse-path').textContent = 'USB 设备';
+  $('browse-confirm').disabled = true;             // 设备列表本身不是可选目录
+  $('browse-list').innerHTML = devices.map(d=>
+    `<button class="browse-item" onclick="enterUsbDevice('${encPath(d.mount_point)}')">`
+    + FOLDER_SVG
+    + `<span>${esc(d.label||d.name||d.mount_point)}</span>`
+    + `<span class="browse-sub">${esc(d.mount_point)} · ${size(d.size)}</span></button>`
+  ).join('');
+}
+
+function enterUsbDevice(encMp){
+  browseRoot = decodeURIComponent(encMp);
+  $('browse-confirm').disabled = false;
+  loadBrowse(encMp, encMp);
+}
+
+async function loadBrowse(encPathArg, encRootArg){
+  const path = decodeURIComponent(encPathArg);
+  const root = encRootArg!==undefined ? decodeURIComponent(encRootArg) : browseRoot;
+  const r = await api('/api/browse?path='+encPath(path)+(root?'&root='+encPath(root):''));
+  if (!r.success){ toast(r.error||'无法读取该目录','error'); return; }
+  currentPath = r.path; browseRoot = root||''; 
+  $('browse-path').textContent = r.path;
+  $('browse-confirm').disabled = false;
+
+  const items = [];
+  // 多设备时给一个回到设备列表的入口（单设备且已绑定就没必要）
+  if (browseUsbOnly && devices.length>1)
+    items.push('<button class="browse-item" onclick="openUsbRoots()">← 设备列表</button>');
+  // 到了设备根目录就不再提供"返回上级"，避免走进本机卷
+  const atRoot = browseRoot && currentPath === browseRoot;
+  if (!atRoot && currentPath !== '/')
+    items.push(`<button class="browse-item" onclick="loadBrowse('${encPath(currentPath.replace(/\/$/,'').split('/').slice(0,-1).join('/')||'/')}')">↑ 返回上级</button>`);
+
+  for (const x of (r.entries||[]).filter(e=>e.type==='dir'))
+    items.push(`<button class="browse-item" onclick="loadBrowse('${encPath((currentPath==='/'?'':currentPath)+'/'+x.name)}')">${FOLDER_SVG}<span>${esc(x.name)}</span></button>`);
+
+  $('browse-list').innerHTML = items.join('') || '<div class="nd">该目录下没有子目录</div>';
+}
+
+function confirmBrowse(){
+  if (browseMode==='save'){ const dir=currentPath; closeBrowse(); savePendingTo(dir); return; }
+  if (browseUsbOnly && !currentPath){ toast('请先选择一个 USB 设备目录','error'); return; }
+  if (browseUsbOnly && browseRoot && currentPath!==browseRoot && !currentPath.startsWith(browseRoot+'/')){
+    toast('源目录必须在所选 USB 设备内','error'); return;
+  }
+  $('f-'+browseField).value = currentPath;
+  closeBrowse();
+}
+
+// 绑定设备变化：源目录若不在新设备里就清空，避免留下跨设备的无效路径
+function onDeviceBindingChange(){
+  const dev = deviceByUuid($('f-device').value);
+  const src = ($('f-source').value||'').trim();
+  if (!dev || !src) return;
+  if (src !== dev.mount_point && !src.startsWith(dev.mount_point + '/')){
+    $('f-source').value = '';
+    toast('源目录已清空：需在新绑定的 USB 设备内重新选择','error');
+  }
+}
+
 // 导出/下载日志: 先弹目录选择器, 再由用户指定保存位置(不再落到浏览器默认下载目录)
 function openSaveBrowse(kind){browseMode='save';pendingSaveKind=kind;
   $('browse-title').textContent=kind==='log'?'选择日志保存目录':'选择配置保存目录';
@@ -92,4 +186,4 @@ function copyQQNumber(){
 }
 function showSponsorModal(){const o=document.getElementById('sponsorModal');if(o)o.classList.add('show')}
 function showSponsorImgFull(img){const o=document.getElementById('sponsorImgOverlay');if(o){o.classList.add('show');document.getElementById('sponsorImgFull').src=img.src}}
-window.onload=async function(){initTheme();await loadAll();window._lastHistRefresh=Date.now();startSyncMonitor()};
+window.onload=async function(){initTheme();await loadAll();const dv=document.getElementById('f-device');if(dv)dv.addEventListener('change',onDeviceBindingChange);window._lastHistRefresh=Date.now();startSyncMonitor()};
