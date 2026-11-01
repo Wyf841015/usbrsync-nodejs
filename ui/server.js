@@ -651,11 +651,69 @@ async function handleApi(pathname, req, res) {
         try {
           for (const d of readdirSync(dir)) {
             const p=join(dir,d);
-            entries.push({ name:d, type:statSync(p).isDirectory()?'dir':'file' });
+            // 单个子项 stat 失败（断掉的符号链接 / 子项自身无权限）不该让整层目录都打不开
+            let isDir=false;
+            try { isDir = statSync(p).isDirectory(); } catch { isDir=false; }
+            entries.push({ name:d, type:isDir?'dir':'file' });
           }
-        } catch { return send(res,200,{success:false,error:'not a directory'}); }
+        } catch (e) {
+          const code = (e && e.code) || 'EUNKNOWN';
+          // 以前一律回 'not a directory'：设备拔掉、目录 mode 000、fuse 挂载只给特定 uid
+          // 这几种完全不同的原因在界面上长得一模一样，用户只能看到「无法读取」四个字。
+          const msg = (code === 'EACCES' || code === 'EPERM') ? `没有读取权限（${code}）`
+                    : code === 'ENOENT'  ? '目录不存在（设备可能已拔出）'
+                    : code === 'ENOTDIR' ? '这不是一个目录'
+                    : `无法读取目录（${code}）`;
+          try { log(`browse 失败 ${dir}: ${code} ${e.message}`); } catch {}
+          return send(res,200,{success:false,code,error:msg,path:dir});
+        }
         entries.sort((a,b)=>a.name.localeCompare(b.name));
         send(res,200,{ success:true, path:dir, entries, ...meta }); return;
+      }
+      case '/diag_usb': {
+        // USB 排查：大容量盘「浏览显示无权限」时看不出是哪一层挂了 ——
+        // lsblk 认没认到、/proc/mounts 实际挂载参数、挂载点 mode/uid、readdir 的真实 errno，一次摊开。
+        const out = { success:true, uid: typeof process.getuid === 'function' ? process.getuid() : null,
+                      node: process.version, now: new Date().toISOString() };
+        try {
+          out.lsblk = JSON.parse(execFileSync('lsblk',
+            ['-J','-b','-o','NAME,TYPE,RM,TRAN,FSTYPE,MOUNTPOINT,LABEL,UUID,SIZE,RO,PKNAME'],
+            { encoding:'utf8', timeout:5000, maxBuffer: 4*1024*1024 }));
+        } catch (e) { out.lsblkError = `${e.code||''} ${e.message}`.trim(); }
+        let procMounts = '';
+        try { procMounts = readFileSync('/proc/mounts','utf8'); } catch (e) { out.procMountsError = e.code; }
+        try { out.devices = await collectUsbMounts(); } catch (e) { out.devicesError = e.message; }
+        out.mounts = [];
+        for (const d of (out.devices || [])) {
+          const it = { device:d.device, mount_point:d.mount_point, fs_type:d.fs_type,
+                       size:d.size, label:d.label, tran:d.tran, ro:d.ro };
+          it.proc_mount = procMounts.split('\n').find((l) => l.split(' ')[1] === d.mount_point) || null;
+          try {
+            const st = statSync(d.mount_point);
+            it.stat = { mode:'0' + (st.mode & 0o777).toString(8), uid:st.uid, gid:st.gid, isDir:st.isDirectory() };
+          } catch (e) { it.statError = `${e.code||''} ${e.message}`.trim(); }
+          try { it.realpath = realpathSync(d.mount_point); } catch (e) { it.realpathError = e.code; }
+          try {
+            const t0 = Date.now();
+            const names = readdirSync(d.mount_point);
+            it.readdir = { ok:true, count:names.length, ms:Date.now()-t0, sample:names.slice(0,5) };
+          } catch (e) { it.readdir = { ok:false, code:e.code||null, message:e.message }; }
+          it.allowed_by_app = isAllowedPath(d.mount_point);
+          out.mounts.push(it);
+        }
+        // /vol00 下的挂载点占位目录：没挂载时是 000，正是「看着有目录、点进去无权限」的样子
+        out.vol00 = [];
+        try {
+          for (const n of readdirSync('/vol00')) {
+            const path = '/vol00/' + n;
+            const rec = { name:n };
+            try { const st = statSync(path); rec.mode = '0' + (st.mode & 0o777).toString(8); }
+            catch (e) { rec.statError = e.code; }
+            rec.mounted = procMounts.split('\n').some((l) => l.split(' ')[1] === path);
+            out.vol00.push(rec);
+          }
+        } catch (e) { out.vol00Error = e.code || e.message; }
+        send(res,200,out); return;
       }
       case '/config_export':
         send(res,200, loadTasks(), { download:'usbrsync-config.json' }); return;
