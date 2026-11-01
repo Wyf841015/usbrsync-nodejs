@@ -698,12 +698,17 @@ async function handleApi(pathname, req, res) {
         }
         if (dir !== root && !dir.startsWith(root + '/'))
           return send(res,200,{success:false,error:'路径超出所选 USB 设备范围'});
-        // 挂载点占位目录（/vol00/<名字>）在设备没插或掉线时是 mode 000 的空目录：
+        // 外接设备的挂载点占位目录（/vol00/<名字>）在设备没插或掉线时是 mode 000 的空目录：
         // root 读得进去，界面就显示成「空文件夹」，用户会以为盘里没内容 —— 直接说清楚。
+        //
+        // ⚠ 只对 /vol00 的直接子目录做这个判断。fnOS 的用户卷目录大量是
+        //   `d---------+`（mode 000 + POSIX ACL，如 /vol1/1000、/vol1/1000/Photos），
+        //   按「mode 000 就算占位」一刀切会把正常卷目录全部误判成「设备未连接」。
         try {
-          const st = statSync(dir);
+          const parent = dirname(dir);
+          const isExtMountRoot = /^\/vol0+$/.test(parent);       // /vol00（外接设备挂载根）
           const mounted = currentMounts().some((m) => m.mount_point === dir);
-          if (!mounted && (st.mode & 0o777) === 0) {
+          if (isExtMountRoot && !mounted && (statSync(dir).mode & 0o777) === 0) {
             return send(res,200,{success:false, code:'ENODEV', path:dir,
               error:'设备未连接（这是挂载点占位目录，插上或重新挂载后才可读）'});
           }

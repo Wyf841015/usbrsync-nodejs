@@ -9,7 +9,8 @@ const MANIFEST_VERSION = readFileSync(new URL('../manifest', import.meta.url), '
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn } from 'node:child_process';
-import { mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, readFileSync, mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -114,6 +115,24 @@ test('usbrsync-nodejs server E2E', { timeout: 30000 }, async (t) => {
   await t.test('browse /tmp', async () => {
     const r = await api('/api/browse?path=/tmp');
     assert.strictEqual(r.body.success, true);
+  });
+
+  // 回归：fnOS 用户卷目录大量是 `d---------+`（mode 000 + POSIX ACL，
+  // 例如 /vol1/1000、/vol1/1000/Photos）。曾经把「mode 000 且不是挂载点」
+  // 一律判成 /vol00 的设备占位目录，导致选 /vol1/1000 下任何目录都报「设备未连接」。
+  await t.test('browse: mode 000 的普通目录仍可浏览（不得误判为设备占位）', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'usbrsync-mode000-'));
+    const locked = join(base, 'locked');
+    mkdirSync(locked);
+    writeFileSync(join(locked, 'a.txt'), 'x');
+    chmodSync(locked, 0o000);
+    t.after(() => { try { chmodSync(locked, 0o755); } catch {} rmSync(base, { recursive: true, force: true }); });
+    const r = await api(`/api/browse?path=${encodeURIComponent(locked)}`);
+    // 关键断言：不能返回 ENODEV（设备未连接）。
+    // 测试进程不是 root，自己读不了 mode 000 的目录会返回 EACCES —— 那是正常的权限报错，
+    // 与「挂载点占位目录」是两码事。
+    assert.notStrictEqual(r.body.code, 'ENODEV', `被误判成设备占位：${r.body.error}`);
+    if (r.body.success) assert.ok((r.body.entries || []).some((e) => e.name === 'a.txt'));
   });
 
   await t.test('404 unknown api', async () => {
