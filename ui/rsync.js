@@ -154,10 +154,13 @@ export function deleteGuard({ sourceFiles, deletes, ratio = 5 }) {
 
 // ── 预检：一次 dry-run 同时拿到「要写入多少字节」和「会删掉多少项」──
 // 取代原先每次同步都跑的 `du -sb` 全盘扫描（大卷上极慢，超时还会把同步误拦）。
-export function preflight({ source, target, del = false, checksum = false, taskId = null, timeoutMs = 180000 }) {
+export function preflight({ source, target, del = false, checksum = false, taskId = null, timeoutMs = 180000, runAs = null }) {
   const cmd = buildRsyncCmd({ source, target, del, taskId, checksum, dry: true, keep: false });
   return new Promise((resolve) => {
-    execFile(cmd[0], cmd.slice(1), { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }, (e, so) => {
+    // dry-run 也得以挂载 owner 的身份跑，否则 fuse 挂载同样 EACCES
+    const eo = { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 };
+    if (runAs && Number.isInteger(runAs.uid)) { eo.uid = runAs.uid; eo.gid = Number.isInteger(runAs.gid) ? runAs.gid : 0; }
+    execFile(cmd[0], cmd.slice(1), eo, (e, so) => {
       if (e) {
         const timedOut = e.killed === true || e.signal === 'SIGTERM' || e.code === 'ETIMEDOUT';
         return resolve({ ok: false, timedOut, reason: timedOut ? `预检超时（>${Math.round(timeoutMs/1000)}s）` : `预检失败 (${e.message})`, stats: null });
@@ -400,7 +403,15 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
     if (_hook?.log) _hook.log(`startSync cmd: ${cmd.join(' ')}`);
     for (attempt = 1; attempt <= maxRetry + 1; attempt++) {
       if (attempt > 1) setStatus('syncing', 0, '', `第 ${attempt} 次尝试`, '', 0);
-      const child = spawn(cmd[0], cmd.slice(1), { stdio: ['ignore','pipe','pipe'] });
+      // runAs：源盘是「别的 uid 挂的 fuse 挂载」时（exFAT/NTFS），root 读不到，
+    // 只能按挂载 owner 的身份跑 rsync，否则整单 EACCES。
+    const spawnOpts = { stdio: ['ignore','pipe','pipe'] };
+    if (opts.runAs && Number.isInteger(opts.runAs.uid)) {
+      spawnOpts.uid = opts.runAs.uid;
+      spawnOpts.gid = Number.isInteger(opts.runAs.gid) ? opts.runAs.gid : 0;
+      if (_hook?.log) _hook.log(`rsync 以 uid=${spawnOpts.uid} gid=${spawnOpts.gid} 运行（源盘挂载 owner）`);
+    }
+    const child = spawn(cmd[0], cmd.slice(1), spawnOpts);
       currentChild = child;
       const r = await execRsync(child, synclog, (p) => setStatus('syncing', p.pct ?? 0, p.file, p.file, p.speed || '', p.xfr || 0, {
         bytes_done: p.bytes, bytes_total: opts.totalBytes || null,
@@ -433,7 +444,12 @@ export function startSync(opts, { setStatus, synclog, appendHistory, notify }) {
     if (opts.bidirectional && !stopRequested && [0,23,24].includes(exitCode)) {
       const revCmd = buildRsyncCmd({ source:opts.target, target:opts.source, del:false, taskId:opts.taskId,
                                      checksum:opts.checksum, dry:false, keep:opts.keep });
-      const child2 = spawn(revCmd[0], revCmd.slice(1), { stdio:['ignore','pipe','pipe'] });
+      const revOpts = { stdio:['ignore','pipe','pipe'] };
+      if (opts.runAs && Number.isInteger(opts.runAs.uid)) {
+        revOpts.uid = opts.runAs.uid;
+        revOpts.gid = Number.isInteger(opts.runAs.gid) ? opts.runAs.gid : 0;
+      }
+      const child2 = spawn(revCmd[0], revCmd.slice(1), revOpts);
       currentChild = child2;
       if (opts.keep) { try { pruneBackupDirs(opts.source, 10); } catch {} }
       const r = await execRsync(child2, synclog, (p) => setStatus('syncing', p.pct ?? 0, p.file, '反向同步: ' + p.file, p.speed || '', p.xfr || 0, {

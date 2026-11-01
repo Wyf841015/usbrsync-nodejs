@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import * as rsync from './rsync.js';
 import { createDaemon } from './daemon.js';
 import { collectUsbMounts, relWithin, rebasePath, legacyRelFor } from './usb.js';
+import { parseMounts, mountForPath, ownerUidOf, listAsUid } from './mountperm.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
@@ -81,6 +82,33 @@ function setSyncStatus(s, p=0, f='', m='', sp='', n=0, extra=null) {
     } catch {}
   }, 300);
 }
+// /proc/mounts 缓存：isAllowedPath 会被每个请求调用，别每次都读盘
+let _mountsCache = { at: 0, list: [] };
+function currentMounts() {
+  const now = Date.now();
+  if (now - _mountsCache.at > 3000) {
+    let list = [];
+    try { list = parseMounts(readFileSync('/proc/mounts', 'utf8')); } catch { /* ignore */ }
+    _mountsCache = { at: now, list };
+  }
+  return _mountsCache.list;
+}
+
+// 外接设备可能被 fnOS 挂到 /vol00 以外（/run/media、/mnt/xxx…），
+// 只要路径落在「当前真的挂载着的可移动/外接文件系统」里就放行，
+// 免得浏览时莫名「root not allowed」。静态前缀仍然照旧生效。
+// 系统自带的 vfat 挂载（/boot/efi 之类）不该因为「可移动文件系统」被放行
+const SYSTEM_MOUNT_DENY = ['/boot', '/sys', '/proc', '/dev', '/run', '/usr', '/etc', '/var/lib/docker'];
+
+function isUnderRemovableMount(p) {
+  const m = mountForPath(p, currentMounts());
+  if (!m || !m.removable_fs) return false;
+  const mp = m.mount_point === '/' ? '' : m.mount_point;
+  if (!mp) return false;                         // 挂到根上的不算外接设备
+  if (SYSTEM_MOUNT_DENY.some((d) => mp === d || mp.startsWith(d + '/'))) return false;
+  return true;
+}
+
 function isAllowedPath(p) {
   if (!p || !p.startsWith('/')) return false;
   // 拒绝含 .. 分量 (路径穿越) 和原始含危险字符的路径
@@ -90,14 +118,14 @@ function isAllowedPath(p) {
   const okPrefix = (prefix) =>
     p === prefix || p.startsWith(prefix + '/') ||
     (prefix === '/vol' ? /^\/vol\d+(\/|$)/.test(p) : false);
-  if (!ALLOWED_PATH_PREFIXES.some(okPrefix)) return false;
+  if (!ALLOWED_PATH_PREFIXES.some(okPrefix) && !isUnderRemovableMount(p)) return false;
   // realpath 归一化后再校验一次 (防 symlink)
   try {
     const real = realpathSync(p);
     if (!ALLOWED_PATH_PREFIXES.some((prefix) => {
       if (prefix === '/vol') return /^\/vol\d+(\/|$)/.test(real);
       return real === prefix || real.startsWith(prefix + '/');
-    })) return false;
+    }) && !isUnderRemovableMount(real)) return false;
   } catch {
     // 路径不存在: realpath 失败, 允许继续 (由调用方处理不存在)
     return true;
@@ -287,12 +315,32 @@ async function requestSync(p) {
   if (!existsSync(p.source)) return { status:'error', message:`源目录不存在：${p.source}` };
   if (!existsSync(p.target)) return { status:'error', message:`目标目录不存在：${p.target}` };
 
+  // 源盘若是「别的 uid 挂的 fuse 挂载」（exFAT/NTFS 常见），root 也读不到：
+  // 预检和 rsync 主进程都要降权到该挂载的 owner，否则整单 EACCES。
+  let runAs = null;
+  try {
+    const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
+    let rootCanRead = true;
+    try { readdirSync(p.source); }
+    catch (e) { rootCanRead = !(e && (e.code === 'EACCES' || e.code === 'EPERM')); }
+    if (!rootCanRead) {
+      const owner = ownerUidOf(mountForPath(p.source, currentMounts()));
+      if (owner && owner.uid !== selfUid) {
+        runAs = { uid: owner.uid, gid: owner.gid };
+        log(`源目录 root 无权限，改以 uid=${owner.uid} 运行（${owner.source}）：${p.source}`);
+      } else {
+        setSyncStatus('idle', 0, '', '源目录无读取权限', '', 0);
+        return { status:'error', message:`源目录无读取权限（EACCES），且找不到可降权的挂载 owner：${p.source}` };
+      }
+    }
+  } catch { /* 检测本身失败就当可读，交给 rsync 报 */ }
+
   // ── 预检（一次 dry-run，同时拿到「要写多少字节」与「会删多少项」）──
   // 取代原先每次同步都跑的全盘 `du -sb`；也是 --delete 的护栏。
   setSyncStatus('syncing', 0, '', '正在预检源目录…', '', 0);
   const pre = await rsync.preflight({
     source: p.source, target: p.target,
-    del: !!p.use_delete, checksum: !!p.checksum, taskId: p.task_id,
+    del: !!p.use_delete, checksum: !!p.checksum, taskId: p.task_id, runAs,
   });
   if (pre.ok) {
     const st = pre.stats || {};
@@ -332,6 +380,7 @@ async function requestSync(p) {
     // 预检拿到的「本次需要传输的字节数」：进度条用它算 x/y，历史用它记录总量
     totalBytes: (pre && pre.ok && pre.stats && pre.stats.transferredBytes) || 0,
     taskName: p.name || '',
+    runAs,
   }, { setStatus:setSyncStatus, synclog:SYNCLOG, appendHistory, notify:notifyDone });
   running = ctl;
   // 完成后清 running (startSync 返回 donePromise, 在完成时 resolve)
@@ -647,28 +696,72 @@ async function handleApi(pathname, req, res) {
           rootEntries.push({ name:'mnt', type:'dir' }, { name:'media', type:'dir' });
           return send(res,200,{success:true, path:'/', entries:rootEntries, ...meta});
         }
-        let entries=[];
+        if (dir !== root && !dir.startsWith(root + '/'))
+          return send(res,200,{success:false,error:'路径超出所选 USB 设备范围'});
+        // 挂载点占位目录（/vol00/<名字>）在设备没插或掉线时是 mode 000 的空目录：
+        // root 读得进去，界面就显示成「空文件夹」，用户会以为盘里没内容 —— 直接说清楚。
+        try {
+          const st = statSync(dir);
+          const mounted = currentMounts().some((m) => m.mount_point === dir);
+          if (!mounted && (st.mode & 0o777) === 0) {
+            return send(res,200,{success:false, code:'ENODEV', path:dir,
+              error:'设备未连接（这是挂载点占位目录，插上或重新挂载后才可读）'});
+          }
+        } catch { /* 不存在等交给下面的 readdir 报 */ }
+        let entries = [];
+        let via = null;
+        let failCode = null;
         try {
           for (const d of readdirSync(dir)) {
-            const p=join(dir,d);
+            const p = join(dir, d);
             // 单个子项 stat 失败（断掉的符号链接 / 子项自身无权限）不该让整层目录都打不开
-            let isDir=false;
-            try { isDir = statSync(p).isDirectory(); } catch { isDir=false; }
-            entries.push({ name:d, type:isDir?'dir':'file' });
+            let isDir = false;
+            try { isDir = statSync(p).isDirectory(); } catch { isDir = false; }
+            entries.push({ name: d, type: isDir ? 'dir' : 'file' });
           }
-        } catch (e) {
-          const code = (e && e.code) || 'EUNKNOWN';
-          // 以前一律回 'not a directory'：设备拔掉、目录 mode 000、fuse 挂载只给特定 uid
-          // 这几种完全不同的原因在界面上长得一模一样，用户只能看到「无法读取」四个字。
-          const msg = (code === 'EACCES' || code === 'EPERM') ? `没有读取权限（${code}）`
-                    : code === 'ENOENT'  ? '目录不存在（设备可能已拔出）'
-                    : code === 'ENOTDIR' ? '这不是一个目录'
-                    : `无法读取目录（${code}）`;
-          try { log(`browse 失败 ${dir}: ${code} ${e.message}`); } catch {}
-          return send(res,200,{success:false,code,error:msg,path:dir});
+        } catch (e0) {
+          failCode = (e0 && e0.code) || 'EUNKNOWN';
+          // exFAT / NTFS 走 fuse 挂载时默认「只允许挂载它的那个 uid 访问」，
+          // 连 root 都会被拒（挂载时没带 allow_other 的话）。
+          // 服务本身是 root，可以直接降权到该挂载的 owner 再读一次。
+          if (failCode === 'EACCES' || failCode === 'EPERM') {
+            const owner = ownerUidOf(mountForPath(dir, currentMounts()));
+            const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
+            if (owner && owner.uid !== selfUid) {
+              try {
+                entries = listAsUid(dir, owner);
+                via = `uid:${owner.uid}(${owner.source})`;
+                try { log(`browse ${dir}：root 无权限，改用 uid=${owner.uid} 读取成功（${owner.source}）`); } catch {}
+              } catch (e1) {
+                try { log(`browse ${dir}：降权到 uid=${owner.uid} 仍失败 ${e1.code || e1.message}`); } catch {}
+              }
+            }
+          }
+          if (!via) {
+            // 以前一律回 'not a directory'：设备拔掉、目录 mode 000、fuse 只给特定 uid
+            // 这几种完全不同的原因在界面上长得一模一样，用户只看到「无法读取」四个字。
+            const m = mountForPath(dir, currentMounts());
+            let msg;
+            if (failCode === 'EACCES' || failCode === 'EPERM') {
+              const owner = ownerUidOf(m);
+              msg = owner && owner.uid !== 0
+                ? `没有读取权限（${failCode}）：该盘由 uid=${owner.uid} 挂载，只有它能访问`
+                : `没有读取权限（${failCode}）`;
+            } else if (failCode === 'ENOENT') {
+              msg = '目录不存在（设备可能已拔出）';
+            } else if (failCode === 'ENOTDIR') {
+              msg = '这不是一个目录';
+            } else {
+              msg = `无法读取目录（${failCode}）`;
+            }
+            try {
+              log(`browse 失败 ${dir}: ${failCode}${m ? ` [挂载 ${m.mount_point} ${m.fstype}]` : ''}`);
+            } catch {}
+            return send(res,200,{success:false,code:failCode,error:msg,path:dir});
+          }
         }
         entries.sort((a,b)=>a.name.localeCompare(b.name));
-        send(res,200,{ success:true, path:dir, entries, ...meta }); return;
+        send(res,200,{ success:true, path:dir, entries, ...meta, ...(via ? { via } : {}) }); return;
       }
       case '/diag_usb': {
         // USB 排查：大容量盘「浏览显示无权限」时看不出是哪一层挂了 ——
@@ -699,6 +792,17 @@ async function handleApi(pathname, req, res) {
             it.readdir = { ok:true, count:names.length, ms:Date.now()-t0, sample:names.slice(0,5) };
           } catch (e) { it.readdir = { ok:false, code:e.code||null, message:e.message }; }
           it.allowed_by_app = isAllowedPath(d.mount_point);
+          // 挂载 owner：fuse 挂载「只允许挂载它的那个 uid 读」，正是「大容量盘无权限」的头号嫌疑
+          try {
+            const owner = ownerUidOf(mountForPath(d.mount_point, currentMounts()));
+            it.owner = owner;
+            if (!it.readdir.ok && owner) {
+              try {
+                const list = listAsUid(d.mount_point, owner);
+                it.as_owner = { ok:true, uid:owner.uid, count:list.length, sample:list.slice(0,5) };
+              } catch (e2) { it.as_owner = { ok:false, uid:owner.uid, code:e2.code||null, message:e2.message }; }
+            }
+          } catch (e2) { it.ownerError = String((e2 && e2.message) || e2); }
           out.mounts.push(it);
         }
         // /vol00 下的挂载点占位目录：没挂载时是 000，正是「看着有目录、点进去无权限」的样子
