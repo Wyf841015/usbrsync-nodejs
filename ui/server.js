@@ -17,7 +17,7 @@ import { parseMounts, mountForPath, ownerUidOf, listAsUid } from './mountperm.js
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(__dirname);   // *usbrsync 根 (target)
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 
 // ── 数据目录 ───────────────────────────────────────────────────
 const DATA_BASE = process.env.TRM_PKGVAR || '/tmp/usbrsync-nodejs';
